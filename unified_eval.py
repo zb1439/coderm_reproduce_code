@@ -30,6 +30,7 @@ import subprocess
 import contextlib
 import unittest
 import multiprocessing
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from operator import itemgetter
@@ -61,11 +62,13 @@ class EvalConfig:
     
     # Inference parameters
     dtype: str = "auto"
-    max_model_len: int = 4096
+    max_model_len: int = 2048
     gpu_memory_utilization: float = 0.8
-    max_num_seqs: int = 512
+    max_num_seqs: int = 64
     tensor_parallel_size: int = 1
     num_gpus: int = 1
+    enforce_eager: bool = True  # Disable CUDA graphs to save GPU memory (helps on 16-24GB GPUs)
+    quantization: Optional[str] = None  # "bitsandbytes" for 4-bit (saves ~50% VRAM), "awq"/"gptq" for pre-quantized models
     
     # Sampling parameters
     temperature: float = 0.8
@@ -133,6 +136,21 @@ def setup_logging(config: EvalConfig) -> logging.Logger:
 
 # ==================== Utility Functions ====================
 
+def compute_total_logprob(logprobs: Optional[List[Optional[Dict[int, Any]]]]) -> float:
+    """
+    Compute total logprob from vLLM logprobs structure.
+    Each element is a dict mapping token_id -> Logprob (with .logprob attribute).
+    Extracts .logprob to avoid TypeError when comparing Logprob instances.
+    """
+    if not logprobs:
+        return 0.0
+    return sum(
+        max((lp.logprob for lp in token_logprobs.values()), default=0.0)
+        if token_logprobs else 0.0
+        for token_logprobs in logprobs
+    )
+
+
 def load_jsonl(filename: str) -> List[Dict]:
     """Load JSONL file"""
     with open(filename, "r", encoding="utf-8") as f:
@@ -149,8 +167,10 @@ def save_jsonl(filename: str, dataset: List[Dict], overwrite: bool = False):
             fp.write(json.dumps(data, ensure_ascii=False) + "\n")
 
 
-def get_free_gpus(threshold: int = 70000) -> List[int]:
-    """Get list of free GPUs"""
+def get_free_gpus(threshold: int = 8192) -> List[int]:
+    """Get list of free GPUs with at least threshold MiB free memory.
+    Default 4096 MiB (4GB) is sufficient for most inference workloads.
+    """
     try:
         output = subprocess.check_output(
             "nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits",
@@ -280,22 +300,33 @@ def run_inference(
     
     # Setup vLLM
     logger.info(f"Initializing vLLM with model: {config.model_path}")
-    free_gpus = get_free_gpus(threshold=70000)
+    free_gpus = get_free_gpus(threshold=8192)  # 4GB min free memory for inference
+    if len(free_gpus) == 0:
+        raise RuntimeError(
+            "No GPUs available with sufficient free memory (need >4GB). "
+            "Check: (1) nvidia-smi shows your GPU, (2) GPU has enough free memory, "
+            "(3) CUDA drivers are properly installed for WSL."
+        )
     if len(free_gpus) < config.num_gpus:
         logger.warning(f"Only {len(free_gpus)} GPUs available, requested {config.num_gpus}")
         config.num_gpus = len(free_gpus)
     
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(gpu_id) for gpu_id in free_gpus[:config.num_gpus])
     
-    llm = LLM(
-        model=config.model_path,
-        trust_remote_code=True,
-        dtype=config.dtype,
-        max_model_len=config.max_model_len,
-        gpu_memory_utilization=config.gpu_memory_utilization,
-        tensor_parallel_size=config.tensor_parallel_size,
-        max_num_seqs=config.max_num_seqs,
-    )
+    llm_kwargs: Dict[str, Any] = {
+        "model": config.model_path,
+        "trust_remote_code": True,
+        "dtype": config.dtype,
+        "max_model_len": config.max_model_len,
+        "gpu_memory_utilization": config.gpu_memory_utilization,
+        "tensor_parallel_size": config.tensor_parallel_size,
+        "max_num_seqs": config.max_num_seqs,
+        "enforce_eager": config.enforce_eager,
+    }
+    if config.quantization:
+        llm_kwargs["quantization"] = config.quantization
+        logger.info(f"Using quantization: {config.quantization} (reduces GPU memory usage)")
+    llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     
     # Prepare prompts
@@ -333,16 +364,8 @@ def run_inference(
             for output in outputs.outputs:
                 # Calculate probability from logprobs
                 logprobs = output.logprobs
-                total_logprob = 0.0
-                if logprobs:
-                    # Sum logprobs for the generated sequence
-                    total_logprob = sum(
-                        max(token_logprobs.values()) if token_logprobs else 0.0
-                        for token_logprobs in logprobs
-                    )
-                    probability = float(torch.exp(torch.tensor(total_logprob)))
-                else:
-                    probability = 1.0
+                total_logprob = compute_total_logprob(logprobs)
+                probability = float(torch.exp(torch.tensor(total_logprob)))
                 
                 all_outputs.append({
                     'task_id': prompts_data[prompt_idx]['task_id'],
@@ -954,10 +977,10 @@ def run_evalplus(
     
     start_time = time.time()
     
-    # Run evalplus
+    # Run evalplus (use python -m for reliable invocation across environments)
     benchmark_name = config.benchmark.replace("+", "")
     cmd = [
-        "evalplus.evaluate",
+        sys.executable, "-m", "evalplus.evaluate",
         benchmark_name,
         "--samples", selected_path,
         "--parallel", str(config.evalplus_parallel),
@@ -1029,12 +1052,18 @@ def main():
     # Inference parameters
     parser.add_argument("--dtype", type=str, default="auto",
                        help="Model dtype")
-    parser.add_argument("--max_model_len", type=int, default=4096,
-                       help="Maximum model length")
+    parser.add_argument("--max_model_len", type=int, default=2048,
+                       help="Maximum model length (default 2048 for memory-constrained GPUs)")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.8,
                        help="GPU memory utilization")
-    parser.add_argument("--max_num_seqs", type=int, default=512,
-                       help="Maximum number of sequences")
+    parser.add_argument("--max_num_seqs", type=int, default=64,
+                       help="Maximum number of sequences (default 64 for memory-constrained GPUs)")
+    parser.add_argument("--no-enforce_eager", dest="enforce_eager", action="store_false", default=True,
+                       help="Disable enforce_eager (faster but uses more GPU memory)")
+    parser.add_argument("--quantization", type=str, default=None,
+                       choices=["bitsandbytes", "awq", "gptq"],
+                       help="Quantization: bitsandbytes (4-bit, works with any model, ~50%% VRAM savings), "
+                            "awq/gptq (for pre-quantized models on HuggingFace)")
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                        help="Tensor parallel size")
     parser.add_argument("--num_gpus", type=int, default=1,
@@ -1088,50 +1117,135 @@ def main():
     parser.add_argument("--skip_evalplus", action="store_true",
                        help="Skip EvalPlus evaluation")
     
+    # Resume support
+    parser.add_argument("--resume_from", type=str, default=None,
+                       choices=["inference", "unit_tests", "execution", "selection", "evalplus"],
+                       help="Resume from a specific step (requires --resume_dir)")
+    parser.add_argument("--resume_dir", type=str, default=None,
+                       help="Path to existing run directory (e.g. output/2026-02-15_15-23-28). Defaults to --output_dir when --resume_from is set.")
+    
     args = parser.parse_args()
     
-    # Create config
-    config = EvalConfig(**vars(args))
-    
-    # Set default log file
-    if config.log_file is None:
-        config.log_file = os.path.join(config.output_dir, config.benchmark, "eval.log")
-    
-    # Setup logging
-    logger = setup_logging(config)
-    
-    # Log configuration
-    logger.info("=" * 60)
-    logger.info("EVALUATION CONFIGURATION")
-    logger.info("=" * 60)
-    for key, value in asdict(config).items():
-        logger.info(f"{key}: {value}")
-    logger.info("=" * 60)
+    # Resume mode: load config from existing run
+    if args.resume_from:
+        resume_dir = os.path.abspath(args.resume_dir or args.output_dir)
+        config_path = os.path.join(resume_dir, "config.json")
+        if not os.path.exists(config_path):
+            parser.error(f"Config not found at {config_path}. Cannot resume.")
+        with open(config_path, "r", encoding="utf-8") as f:
+            saved_config = json.load(f)
+        config = EvalConfig(**saved_config)
+        config.output_dir = resume_dir
+        if config.log_file is None:
+            config.log_file = os.path.join(config.output_dir, config.benchmark, "eval.log")
+        logger = setup_logging(config)
+        logger.info("=" * 60)
+        logger.info("RESUME MODE")
+        logger.info("=" * 60)
+        logger.info(f"Resuming from step: {args.resume_from}")
+        logger.info(f"Resume directory: {resume_dir}")
+    else:
+        # Create config
+        config = EvalConfig(**{k: v for k, v in vars(args).items() if k in EvalConfig.__dataclass_fields__})
+        
+        # Create timestamped output directory under output_dir
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        config.output_dir = os.path.join(config.output_dir, timestamp)
+        os.makedirs(config.output_dir, exist_ok=True)
+        
+        # Save config to file
+        config_path = os.path.join(config.output_dir, "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(asdict(config), f, indent=2, ensure_ascii=False)
+        
+        # Set default log file
+        if config.log_file is None:
+            config.log_file = os.path.join(config.output_dir, config.benchmark, "eval.log")
+        
+        logger = setup_logging(config)
+        
+        # Log configuration
+        logger.info("=" * 60)
+        logger.info("EVALUATION CONFIGURATION")
+        logger.info("=" * 60)
+        logger.info(f"Output directory: {config.output_dir}")
+        logger.info(f"Config saved to: {config_path}")
+        for key, value in asdict(config).items():
+            logger.info(f"{key}: {value}")
+        logger.info("=" * 60)
     
     try:
         total_start_time = time.time()
+        selected_path = None
         
-        # Step 1: Inference
-        inference_results, raw_output_path = run_inference(config, logger)
-        
-        # Step 2: Extract unit tests
-        unit_test_path = extract_unit_tests(inference_results, config, logger)
-        
-        # Step 3: Execute unit tests
-        result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
-        
-        # Step 4: Select solutions
-        selected_path = select_solutions(result_path, config.solution_path, config, logger)
-        
-        # Step 5: Run EvalPlus
-        run_evalplus(selected_path, config, logger)
+        if args.resume_from == "evalplus":
+            # Resume: run only EvalPlus
+            selected_path = os.path.join(
+                config.output_dir, config.benchmark, "selection",
+                f"select_in_{config.num_solutions}_sol_by_{config.num_unit_tests}_ut_max+vote.jsonl"
+            )
+            if not os.path.exists(selected_path):
+                raise FileNotFoundError(
+                    f"Selection file not found: {selected_path}. "
+                    "Ensure previous steps completed successfully."
+                )
+            run_evalplus(selected_path, config, logger)
+        elif args.resume_from == "selection":
+            # Resume: run selection and EvalPlus
+            result_path = os.path.join(
+                config.output_dir, config.benchmark, "execution",
+                f"{config.num_solutions}_sol_{config.num_unit_tests}_ut_result.jsonl"
+            )
+            if not os.path.exists(result_path):
+                raise FileNotFoundError(f"Execution results not found: {result_path}")
+            selected_path = select_solutions(result_path, config.solution_path, config, logger)
+            run_evalplus(selected_path, config, logger)
+        elif args.resume_from == "execution":
+            # Resume: run execution, selection, EvalPlus
+            unit_test_path = os.path.join(
+                config.output_dir, config.benchmark, "unit_tests",
+                f"unit_tests_{config.num_unit_tests}.jsonl"
+            )
+            if not os.path.exists(unit_test_path):
+                raise FileNotFoundError(f"Unit tests not found: {unit_test_path}")
+            result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
+            selected_path = select_solutions(result_path, config.solution_path, config, logger)
+            run_evalplus(selected_path, config, logger)
+        elif args.resume_from == "unit_tests":
+            # Resume: run extraction, execution, selection, EvalPlus
+            raw_path = os.path.join(
+                config.output_dir, config.benchmark, "inference",
+                config.raw_inference_filename if not config.use_previous_ut else config.sampled_inference_filename
+            )
+            if not os.path.exists(raw_path):
+                raise FileNotFoundError(f"Inference results not found: {raw_path}")
+            inference_results = load_jsonl(raw_path)
+            unit_test_path = extract_unit_tests(inference_results, config, logger)
+            result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
+            selected_path = select_solutions(result_path, config.solution_path, config, logger)
+            run_evalplus(selected_path, config, logger)
+        elif args.resume_from == "inference":
+            # Resume: run full pipeline from inference
+            inference_results, _ = run_inference(config, logger)
+            unit_test_path = extract_unit_tests(inference_results, config, logger)
+            result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
+            selected_path = select_solutions(result_path, config.solution_path, config, logger)
+            run_evalplus(selected_path, config, logger)
+        else:
+            # Full pipeline
+            inference_results, raw_output_path = run_inference(config, logger)
+            unit_test_path = extract_unit_tests(inference_results, config, logger)
+            result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
+            selected_path = select_solutions(result_path, config.solution_path, config, logger)
+            run_evalplus(selected_path, config, logger)
         
         total_elapsed = time.time() - total_start_time
         logger.info("=" * 60)
         logger.info("EVALUATION COMPLETED SUCCESSFULLY")
         logger.info("=" * 60)
         logger.info(f"Total time: {total_elapsed:.2f} seconds")
-        logger.info(f"Selected solutions: {selected_path}")
+        if selected_path:
+            logger.info(f"Selected solutions: {selected_path}")
         
     except Exception as e:
         logger.error(f"Evaluation failed: {e}", exc_info=True)
