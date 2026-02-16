@@ -253,6 +253,254 @@ Logging is configured to write to both console and file:
 - **Levels**: DEBUG, INFO, WARNING, ERROR
 - **File**: Defaults to `{output_dir}/{benchmark}/eval.log`
 
+## GPU Memory Management for unified_eval.py
+
+This section describes how to manage GPU memory when running the CodeRM evaluation pipeline with `unified_eval.py`. It covers quantization, free GPU detection, and vLLM parameters tuned for common GPU sizes.
+
+---
+
+### 1. Quantization
+
+Quantization reduces model precision to lower VRAM usage. Use `--quantization` to enable it.
+
+#### Options
+
+| Option | Use Case | VRAM Savings | Notes |
+|-------|----------|--------------|-------|
+| `bitsandbytes` | Any model | ~50% (FP16→4-bit) | Dynamic 4-bit quantization. Works with any HuggingFace model. Requires `bitsandbytes` package. |
+| `awq` | Pre-quantized models | ~75% | Use models already quantized with AWQ (e.g. from TheBloke, RedHat AI on HuggingFace). |
+| `gptq` | Pre-quantized models | ~75% | Use models already quantized with GPTQ. |
+
+#### Examples
+
+```bash
+# 4-bit quantization for any model (recommended for 8–16GB GPUs)
+python unified_eval.py --model_path KAKA22/CodeRM-8B --quantization bitsandbytes ...
+
+# Pre-quantized AWQ model (if available for your model)
+python unified_eval.py --model_path path/to/model-AWQ --quantization awq ...
+
+# Pre-quantized GPTQ model
+python unified_eval.py --model_path path/to/model-GPTQ --quantization gptq ...
+```
+
+#### Dependencies
+
+- **bitsandbytes**: `pip install bitsandbytes` (already in requirements.txt)
+- **awq/gptq**: Use models from HuggingFace that are published in AWQ/GPTQ format
+
+---
+
+### 2. Free GPU Detection Threshold
+
+The script selects GPUs with at least a given amount of free memory (in MiB). The threshold is used in `get_free_gpus(threshold=...)` and is **hardcoded** at 8192 MiB (8 GB) in `run_inference()`.
+
+#### Current Behavior
+
+- Default threshold: **8192 MiB (8 GB)**
+- GPUs with less free memory are skipped
+- Location: `unified_eval.py` line ~303: `free_gpus = get_free_gpus(threshold=8192)`
+
+#### Adjusting the Threshold
+
+**Option A: Edit the code**
+
+In `unified_eval.py`, change the threshold in the `run_inference` function:
+
+```python
+# More lenient (e.g. 4 GB) – useful when other processes use GPU
+free_gpus = get_free_gpus(threshold=4096)
+
+# Stricter (e.g. 16 GB) – for large models or multi-GPU
+free_gpus = get_free_gpus(threshold=16384)
+```
+
+**Option B: Add a CLI argument**
+
+Add to the argument parser:
+
+```python
+parser.add_argument("--gpu_memory_threshold", type=int, default=8192,
+                    help="Minimum free GPU memory (MiB) to consider a GPU available")
+```
+
+Then in `run_inference`:
+
+```python
+free_gpus = get_free_gpus(threshold=config.gpu_memory_threshold)
+```
+
+#### Suggested Thresholds by Scenario
+
+| Scenario | Threshold (MiB) | Notes |
+|---------|-----------------|-------|
+| Shared GPU, light load | 4096 (4 GB) | Other processes may use the rest |
+| Dedicated GPU, 8B model | 8192 (8 GB) | Default |
+| Dedicated GPU, 13B+ model | 12288 (12 GB) | Avoid GPUs with little headroom |
+| Multi-GPU, large model | 16384 (16 GB) | Ensure enough free memory per GPU |
+
+---
+
+### 3. vLLM Parameters by GPU Size
+
+Tune these parameters based on your GPU VRAM. All can be set via command-line arguments.
+
+#### Parameter Overview
+
+| Parameter | Default | Effect | Trade-off |
+|-----------|---------|--------|-----------|
+| `--gpu_memory_utilization` | 0.8 | Fraction of GPU memory vLLM may use | Higher = more KV cache, more OOM risk |
+| `--max_model_len` | 2048 | Max context length | Lower = less KV cache, less memory |
+| `--max_num_seqs` | 64 | Max batch size | Lower = less memory, slower inference |
+| `--enforce_eager` | True | Disable CUDA graphs | True = less memory, slightly slower |
+| `--quantization` | None | 4-bit or pre-quantized | Reduces model weight memory |
+| `--tensor_parallel_size` | 1 | Split model across GPUs | >1 for models that don’t fit on one GPU |
+
+### 8 GB GPU (e.g. RTX 3070, RTX 4060)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --quantization bitsandbytes \
+  --gpu_memory_utilization 0.75 \
+  --max_model_len 2048 \
+  --max_num_seqs 16 \
+  --enforce_eager \
+  ...
+```
+
+- Use **bitsandbytes** quantization
+- Lower `gpu_memory_utilization` (0.7–0.75)
+- Lower `max_num_seqs` (8–16)
+- Keep `enforce_eager` (default)
+
+#### 12 GB GPU (e.g. RTX 3060 12GB, RTX 4070)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --quantization bitsandbytes \
+  --gpu_memory_utilization 0.8 \
+  --max_model_len 2048 \
+  --max_num_seqs 32 \
+  --enforce_eager \
+  ...
+```
+
+- Quantization still recommended for 8B models
+- Can increase `max_num_seqs` to 24–32
+
+#### 16–24 GB GPU (e.g. RTX 4080, RTX 4090, A10)
+
+```bash
+# 8B model – no quantization needed
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.85 \
+  --max_model_len 2048 \
+  --max_num_seqs 64 \
+  --enforce_eager \
+  ...
+
+# 8B model – faster with CUDA graphs (if OOM, add --enforce_eager)
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.9 \
+  --max_model_len 4096 \
+  --max_num_seqs 64 \
+  --no-enforce_eager \
+  ...
+```
+
+- 8B fits without quantization
+- Can try `--no-enforce_eager` for speed
+- Can raise `max_model_len` to 4096 if needed
+
+#### 40–48 GB GPU (e.g. A100 40GB, A6000)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.95 \
+  --max_model_len 8192 \
+  --max_num_seqs 128 \
+  --no-enforce_eager \
+  ...
+```
+
+- High utilization (0.9–0.95)
+- Larger `max_model_len` and `max_num_seqs`
+- CUDA graphs usually safe
+
+#### 80 GB GPU (e.g. A100 80GB, H100)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.98 \
+  --max_model_len 16384 \
+  --max_num_seqs 256 \
+  --no-enforce_eager \
+  ...
+```
+
+- Near-maximum utilization
+- Large context and batch sizes
+
+#### Multi-GPU (Tensor Parallelism)
+
+For models that don’t fit on one GPU (e.g. 70B):
+
+```bash
+python unified_eval.py \
+  --model_path meta-llama/Llama-3-70B-Instruct \
+  --tensor_parallel_size 2 \
+  --num_gpus 2 \
+  --gpu_memory_utilization 0.9 \
+  ...
+```
+
+- Set `tensor_parallel_size` and `num_gpus` to the number of GPUs
+- Ensure `get_free_gpus` threshold is high enough for all GPUs
+
+---
+
+### 4. Quick Reference
+
+| GPU VRAM | Quantization | gpu_memory_util | max_num_seqs | enforce_eager |
+|----------|--------------|-----------------|--------------|---------------|
+| 8 GB     | bitsandbytes | 0.70–0.75       | 8–16         | Yes           |
+| 12 GB    | bitsandbytes | 0.75–0.80       | 24–32        | Yes           |
+| 16 GB    | Optional     | 0.80–0.85       | 48–64        | Yes           |
+| 24 GB    | No           | 0.85–0.90       | 64           | Optional      |
+| 40+ GB   | No           | 0.90–0.95       | 128+         | No            |
+| 80 GB    | No           | 0.95–0.98       | 256+         | No            |
+
+---
+
+### 5. Troubleshooting
+
+#### OOM (Out of Memory)
+
+1. Enable quantization: `--quantization bitsandbytes`
+2. Lower `--gpu_memory_utilization` (e.g. 0.6–0.7)
+3. Lower `--max_num_seqs` (e.g. 8 or 16)
+4. Lower `--max_model_len` (e.g. 1024)
+5. Ensure `--enforce_eager` is set (default)
+
+#### "No GPUs available with sufficient free memory"
+
+- Lower the free-GPU threshold in `get_free_gpus(threshold=...)` (e.g. 4096)
+- Free GPU memory: close other processes, `nvidia-smi` to inspect
+- Set `CUDA_VISIBLE_DEVICES` to a specific GPU: `export CUDA_VISIBLE_DEVICES=0`
+
+#### Slow Inference
+
+- Try `--no-enforce_eager` if you have enough VRAM
+- Increase `--max_num_seqs` if memory allows
+- Increase `--gpu_memory_utilization` (e.g. 0.9) if stable
+
+
 ## Common Use Cases
 
 ### 1. Full Evaluation Pipeline
@@ -316,50 +564,6 @@ python unified_eval.py \
     --sample_top_k 25 \
     --num_unit_tests 25
 ```
-
-## Troubleshooting
-
-### GPU Memory Issues
-
-If you encounter GPU memory errors:
-
-1. Reduce `--gpu_memory_utilization` (e.g., 0.6)
-2. Reduce `--max_num_seqs` (e.g., 256)
-3. Reduce `--num_gpus` or use smaller model
-
-### Slow Execution
-
-To speed up execution:
-
-1. Increase `--mp_num` (number of parallel processes)
-2. Increase `--chunk_size` for larger batches
-3. Use more GPUs with `--num_gpus`
-
-### EvalPlus Errors
-
-If EvalPlus fails:
-
-1. Set `EVALPLUS_MAX_MEMORY_BYTES=-1` (already done automatically)
-2. Reduce `--evalplus_parallel`
-3. Use `--skip_evalplus` to skip this step
-
-### Probability Calculation
-
-The script calculates probabilities from logprobs. If probabilities seem incorrect:
-
-1. Check that `logprobs=5` is set in sampling params (it is by default)
-2. Verify model supports logprobs
-3. Check log file for warnings
-
-## Integration with Existing Pipeline
-
-The script is designed to be compatible with existing data formats:
-
-- **Input**: Uses same JSONL format as original pipeline
-- **Output**: Generates same format as original pipeline
-- **Solutions**: Compatible with existing solution files
-
-You can use the output files with existing scripts if needed.
 
 ## Best Practices
 
