@@ -1,200 +1,605 @@
-# [ACL 2025] Dynamic Scaling of Unit Tests for Code Reward Modeling
+# Unified Evaluation Script - Instruction Guide
 
-![Scaling on different solution](images/scale_on_diff_sol.png)
-![Scaling on different difficulty](images/scale_on_diff_diff.png)
+## Overview
 
-<p align="center">
-  <a href="https://code-reward-model.github.io/">[🏠 Homepage]</a> 
-  |<a href="https://arxiv.org/abs/2501.01054">[📄 arXiv]</a> |
-<a href="https://huggingface.co/datasets/KAKA22/CodeRM-UnitTest">[📊 Dataset]</a> |
-<a href="https://huggingface.co/KAKA22/CodeRM-8B">[📦 Model]</a> |
-  <a href="https://github.com/RUCKBReasoning/CodeRM">[💻 Code]</a> 
-</p>
-<hr>
+The `unified_eval.py` script provides a one-command solution for running the complete CodeRM evaluation pipeline. It integrates all steps from inference to final evaluation, with optimizations for speed and parallelization.
 
-## 🔔 News
+## Quick Start
 
-[2025-05] 🎉 CodeRM has been accepted to ACL 2025 as a main conference paper.
-
-[2025-01] 🔥 We have open-sourced the unit test generator, training dataset, Docker environment for efficient large-scale code execution, and the code for inference, preprocessing, and evaluation.
-
-## Introduction
-
-We explore the impact of scaling unit tests to enhance code reward signal quality across different LLMs and unit test scales. The result reveals a positive correlation between the number of unit tests and reward signal quality, with greater benefits observed in more challenging problems.
-
-In light of these observations, we train a lightweight yet effective unit test generator named **CodeRM-8B** and employ dynmaic scaling over problem of different difficulties to facilitate efficient and high-quality unit test scaling. Experimental results show that our approach significantly improves performance across various models on three benchmarks (e.g., with gains of 18.43% for Llama3-8B and 3.42% for GPT-4o-mini on HumanEval Plus).
-
-## Model
-
-CodeRM-8B is a small yet powerful model designed to enable efficient and high-quality unit test generation.  It is trained on a dataset of 60k high-quality synthetic Python unit tests using Llama3.1-70B-Instruct.  These unit tests are synthesized based on two well-regarded code instruction tuning datasets: [CodeFeedback-Filtered-Instruction](https://huggingface.co/datasets/m-a-p/CodeFeedback-Filtered-Instruction) and the training set of [TACO](https://huggingface.co/datasets/BAAI/TACO). The training dataset used for unit test generation is openly available under 
-[CodeRM-UnitTest](https://huggingface.co/datasets/KAKA22/CodeRM-UnitTest).
-
-**Prompt Format:**
-
-```
-Below is a question and it's corresponding code answer. Please write test cases to check the correctness of the code answer. You need to use the unittest library in Python and create a test class for testing.
-
-### question
-{question}
-
-### code solution
-{code in function format}
-
-Please add detailed comments to the test cases you write. You do not need to test the function's ability to throw exceptions.
-```
-
-## Performance
-
-### Best-of-N
-
-First, we evaluate the performance of CodeRM-8B using a best-of-N setting. In this setup, an LLM (policy model) generates
-100 candidate code solutions for a given programming problem, while another LLM (reward model) generates 100 unit 
-tests. The optimal code solution is then selected based on majority voting derived from the execution results 
-of these unit tests.
-
-Under this framework, our trained unit test generator demonstrates performance comparable to Llama3.1-70B-Instruct,
-despite having an 8x smaller parameter size. The detailed evaluation results across three well-known benchmarks 
-are as follows:
-
-| Model | Policy: Llama3-8B | Policy: Llama3-70B | Policy: GPT-3.5 | Policy: GPT-4o-mini |
-| :------ | :------ | :------ | :------ | :------ |
-| **Benchmark: HumanEval Plus** |||||
-| Vanilla | 53.58 | 73.74 | 67.83 | 82.96 |
-| Reward: Llama3.1-8B | 66.84 (+13.26) | 77.14 (+3.40) | 76.32 (+8.49) | 83.11 (+0.15) |
-| Reward: Llama3.1-70B | **72.04 (+18.46)** | <u>78.54 (+4.80</u>) | **79.76 (+11.93)** | <u>85.45 (+2.49</u>) |
-| Reward: CodeRM-8B | <u>72.01 (+18.43</u>) | **78.69 (+4.95)** | <u>78.01 (+10.18</u>) | **86.38 (+3.42)** |
-| **Benchmark: MBPP Plus** |||||
-| Vanilla | 49.20 | 69.33 | 70.53 | 71.59 |
-| Reward: Llama3.1-8B | 64.31 (+15.11) | 71.64 (+2.31) | 74.18 (+3.65) | 74.48 (+2.89) |
-| Reward: Llama3.1-70B | <u>65.26 (+16.06</u>) | <u>71.85 (+2.52</u>) | <u>75.72 (+5.19</u>) | <u>74.96 (+3.37</u>) |
-| Reward: CodeRM-8B | **66.71 (+17.51)** | **72.44 (+3.11)** | **75.96 (+5.43)** | **75.20 (+3.61)** |
-| **Benchmark: LiveCodeBench** |||||
-| Vanilla | 11.98 | 25.30 | 20.55 | 34.83 |
-| Reward: Llama3.1-70B | <u>13.28 (+1.30</u>) | **28.46 (+3.16)** | **22.80 (+2.25)** | <u>38.60 (+3.77</u>) |
-| Reward: CodeRM-8B | **15.21 (+3.23)** | <u>27.73 (+2.43</u>)| <u>21.76 (+1.21</u>) | **39.20 (+4.37)** |
-
-### Quality of Unit Test
-
-We evaluate the quality of the unit test generated by CodeRM-8B. As each unit test functions as a classifier to 
-determine correct or incorrect solutions, we first utilize accuracy and F1 score as metrics to assess the 
-classification performance of the unit test. 
-
-We further propose two new metrics to detailed evaluate the possibility of the unit test making incorrect judgments.
-False Acceptance Rate (FAR) measures the probability of wrong solutions being accepted by unit tests.
-False Rejection Rate (FRR) measures the probability of correct solutions being rejected by unit tests.
-The calculation formulas for these four metrics are introduced in Appendix D of the paper.
-
-Below is the quality of individual unit tests and the combination of multiple unit tests on HumanEval Plus, 
-utilizing Llama3.1-8B as the policy model. The top two performances are marked in **bold** and _underlined_.
-
-| **Model**           | **Acc (↑)**   | **F1 (↑)**    | **FAR (↓)**   | **FRR (↓)**   |
-|----------------------|---------------|---------------|---------------|---------------|
-| **Quality of Individual Unit Tests** |               |               |               |               |
-| Llama3.1-8B         | 60.02         | 44.97         | 13.66         | 46.13         |
-| Llama3.1-70B        | **73.65**     | **70.15**     | **11.10**     | **34.51**     |
-| *CodeRM-8B (Ours)*      | <u>69.64</u>       | <u>63.63</u>       | <u>11.17</u>       | <u>38.55</u>       |
-| **Quality of Multiple Unit Tests** |               |               |               |               |
-| Llama3.1-8B         | 74.21         | 74.35         | 20.44         | 30.55         |
-| Llama3.1-70B        | <u>78.30</u>       | <u>78.76</u>       | <u>17.19</u>       | <u>25.97</u>       |
-| *CodeRM-8B (Ours)*      | **80.46**     | **81.27**     | **16.48**     | **22.71**     |
-
-## Reproduction
-
-### File Structure
-
-Below are the core files for reproducing our experiments or employing CodeRM-8B.
-
-```
-CodeRM/
-│
-├── data/                     # The benchmark and inference result of our experiments.
-│   ├── benchmark/            # The benchmark data.
-│   ├── result/               # The generated solution and unit test based on benchmark.
-│
-├── inference/                # The code for generating code solution and unit test.
-│   ├── config.json           # The configuration for inference.
-│   └── inference_mp.py       # The code for multi-process inference.
-│
-├── preprocess/               # The code for prerocessing results after inference.
-│   ├── merge_output.py       # Merge the output of each process after multi-process inference.
-│   ├── extract_solution.py   # Extract solution for inference result.
-│   └── extract_unit_test.py  # Extract unit test for inference result.
-│
-├── evaluation/               # The code for code execution and calculate best-of-n accuracy.
-│   ├── evaluate.py           # Execute unit test on code solution and obtain the result.
-│   └── calculate_result.py   # Calculate the best-of-n accuracy based on majority voting. 
-│
-└── docker_source/            # The source code of the code execution environment.
-```
-
-### Reproduction Guide
-
-#### Step 1: Multi-Process Inference
-
-We provide a Python script for multi-process inference to improve efficiency. First, modify the configuration file located at `inference/config.json` as needed. Then, run the following command:
+### Basic Usage
 
 ```bash
-cd inference
-python inference_mp.py --config config.json
+python unified_eval.py \
+    --model_path /path/to/coderm-8b \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_llama-8b-instruct_200.jsonl \
+    --benchmark humaneval \
+    --num_unit_tests 100 \
+    --num_solutions 100
 ```
 
-#### Step 2: Preprocessing Inference Results
+### Using Previously Generated Unit Tests
 
-After running the inference script, you need to preprocess the output to obtain either code solutions or unit tests. Since the inference uses multiple processes, you must merge the results from all processes:
+If you've already generated unit tests and want to simulate top-p or top-k sampling:
 
 ```bash
-cd preprocess
-python merge_output.py --mp_num MP_NUM --input_dir INPUT_DIR
+python unified_eval.py \
+    --model_path /path/to/coderm-8b \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_llama-8b-instruct_200.jsonl \
+    --use_previous_ut \
+    --previous_ut_path output/humaneval/inference/raw_inference_results.jsonl \
+    --sample_top_k 50 \
+    --num_unit_tests 50
 ```
 
-Next, extract the desired outputs:
-
-- To extract **code solutions**, run:
-
-  ```bash
-  python extract_solution.py --data_path DATA_PATH --id_path ID_PATH --output_path OUTPUT_PATH
-  ```
-
-- To extract **unit tests**, run:
-
-  ```bash
-  python extract_unit_test.py --data_path DATA_PATH --id_path ID_PATH --output_path OUTPUT_PATH
-  ```
-
-#### Step 3: Executing Unit Tests
+Or with top-p sampling:
 
 ```bash
-python evaluation/evaluate.py --benchmark BENCHMARK --sol_path SOLUTION_JSONL_PATH --ut_path UNIT_TEST_JSONL_PATH --sol_model SOL_MODEL --ut_model UT_MODEL --sol_num SOL_NUM --ut_num UT_NUM --mp_num MP_NUM
+python unified_eval.py \
+    --model_path /path/to/coderm-8b \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_llama-8b-instruct_200.jsonl \
+    --use_previous_ut \
+    --previous_ut_path output/humaneval/inference/raw_inference_results.jsonl \
+    --sample_top_p 0.8 \
+    --num_unit_tests 50
 ```
 
-#### Step 4: Performance Evaluation
+## Critical Paths and Functions
 
-First, run `ipython` or a custom jupyter notebook to `from evaluation.evaluate import *`
-and run `select_sol_multi` with the correct arguments. `select_sol_multi` will first select the solutions that have the most passed unit tests, and then pick the ones that are most consistent with other candidate solutions (majority voting).
+### 1. Inference Pipeline (`run_inference`)
 
-After generating the jsonl file with prefix `select_in_`, run the official `evalplus.evaluate` command to compute pass@1.
+**Location**: Lines 200-310
+
+**Purpose**: Generates unit tests using vLLM with probability recording.
+
+**Key Functions**:
+- `run_inference()`: Main inference function that:
+  - Loads prompts from JSONL file
+  - Initializes vLLM with specified configuration
+  - Generates unit tests with logprobs enabled
+  - Calculates generation probabilities
+  - Saves raw inference results with probabilities
+
+**Critical Parameters**:
+- `logprobs=5`: Enables probability calculation (top 5 logprobs)
+- `n`: Number of samples per prompt (affects total generation count)
+- `num_unit_tests`: Target number of unit tests per task
+
+**Output**: 
+- Raw inference results with probabilities saved to `output/{benchmark}/inference/raw_inference_results.jsonl`
+
+### 2. Unit Test Extraction (`extract_unit_tests`)
+
+**Location**: Lines 312-360
+
+**Purpose**: Extracts valid unit tests from inference responses.
+
+**Key Functions**:
+- `extract_unit_test()`: Extracts unit test code from markdown-formatted responses
+- `extract_class_names()`: Finds test class names using AST parsing
+- `remove_func()`: Removes function definitions, keeps only test classes
+
+**Critical Logic**:
+- Parses markdown code blocks (```python ... ```)
+- Validates unit test structure (must contain exactly one test class)
+- Formats unit tests for execution with unittest framework
+
+**Output**:
+- Extracted unit tests saved to `output/{benchmark}/unit_tests/unit_tests_{num}.jsonl`
+
+### 3. Unit Test Execution (`execute_unit_tests`)
+
+**Location**: Lines 500-600
+
+**Purpose**: Executes unit tests on solutions in parallel.
+
+**Key Functions**:
+- `execute_unit_tests()`: Main execution coordinator
+- `run_unit_tests()`: Parallel execution using ProcessPoolExecutor
+- `handle_execute()`: Wraps execution in isolated process with timeout
+- `execute_unittest()`: Actual test execution with result capture
+
+**Critical Features**:
+- **Parallelization**: Uses `mp_num` processes for concurrent execution
+- **Timeout Protection**: Each test has `time_limit_seconds` timeout
+- **Isolation**: Each test runs in separate process to prevent interference
+- **Chunking**: Processes data in chunks to manage memory
+
+**Output**:
+- Execution results saved to `output/{benchmark}/execution/{num_sol}_sol_{num_ut}_ut_result.jsonl`
+
+### 4. Solution Selection (`select_solutions`)
+
+**Location**: Lines 602-680
+
+**Purpose**: Selects best solutions using majority voting.
+
+**Key Algorithm**:
+1. For each task, count passed unit tests per solution
+2. Find solutions with maximum passed tests
+3. Among top solutions, select by consistency (majority voting)
+4. If multiple solutions have same consistency, select all
+
+**Critical Logic**:
+- Uses set operations to track which unit tests pass for each solution
+- Implements two-stage selection: max pass count → max consistency
+- Handles edge cases (no solutions, all fail, etc.)
+
+**Output**:
+- Selected solutions saved to `output/{benchmark}/selection/select_in_{num_sol}_sol_by_{num_ut}_ut_max+vote.jsonl`
+
+### 5. EvalPlus Evaluation (`run_evalplus`)
+
+**Location**: Lines 682-720
+
+**Purpose**: Runs official EvalPlus evaluation to compute pass@1.
+
+**Key Features**:
+- Calls `evalplus.evaluate` command
+- Sets `EVALPLUS_MAX_MEMORY_BYTES=-1` to avoid memory errors
+- Supports parallel execution
+
+**Output**:
+- EvalPlus results printed to console and log file
+
+### 6. Top-p/Top-k Sampling (`load_previous_and_sample`)
+
+**Location**: Lines 312-360
+
+**Purpose**: Samples from previously generated unit tests.
+
+**Key Functions**:
+- `load_previous_and_sample()`: Loads previous results and applies sampling
+- Supports both top-k (select k highest probability) and top-p (cumulative probability threshold)
+
+**Critical Logic**:
+- Sorts unit tests by probability (descending)
+- For top-k: selects first k tests
+- For top-p: selects tests until cumulative probability exceeds threshold
+
+## Configuration Parameters
+
+### Required Arguments
+
+- `--model_path`: Path to the model for unit test generation
+- `--prompt_path`: Path to prompt JSONL file (e.g., `data/benchmark/input_humaneval+_ut.jsonl`)
+- `--solution_path`: Path to solution JSONL file
+
+### Inference Parameters
+
+- `--num_unit_tests`: Number of unit tests to generate per task (default: 100)
+- `--num_solutions`: Number of solutions to evaluate (default: 100)
+- `--temperature`: Sampling temperature (default: 0.8)
+- `--top_p`: Top-p sampling parameter (default: 0.95)
+- `--top_k`: Top-k sampling parameter (default: -1, disabled)
+- `--max_tokens`: Maximum tokens to generate (default: 2048)
+- `--n`: Number of samples per prompt (default: 1)
+
+### Hardware Parameters
+
+- `--num_gpus`: Number of GPUs to use (default: 1)
+- `--tensor_parallel_size`: Tensor parallel size (default: 1)
+- `--gpu_memory_utilization`: GPU memory utilization (default: 0.8)
+- `--max_num_seqs`: Maximum number of sequences (default: 512)
+
+### Execution Parameters
+
+- `--mp_num`: Number of processes for unit test execution (default: 8)
+- `--chunk_size`: Chunk size for processing (default: 1000)
+- `--time_limit_seconds`: Time limit per unit test (default: 1.0)
+- `--save_details`: Save detailed execution results
+
+### Sampling from Previous Results
+
+- `--use_previous_ut`: Enable using previously generated unit tests
+- `--previous_ut_path`: Path to previous results with probabilities
+- `--sample_top_p`: Top-p value for sampling (mutually exclusive with top_k)
+- `--sample_top_k`: Top-k value for sampling (mutually exclusive with top_p)
+
+### Output Parameters
+
+- `--output_dir`: Output directory (default: "output")
+- `--log_file`: Log file path (default: `{output_dir}/{benchmark}/eval.log`)
+- `--log_level`: Logging level (DEBUG, INFO, WARNING, ERROR)
+
+## Output Structure
+
+```
+output/
+└── {benchmark}/
+    ├── eval.log                          # Main log file
+    ├── inference/
+    │   └── raw_inference_results.jsonl   # Raw inference with probabilities
+    ├── unit_tests/
+    │   └── unit_tests_{num}.jsonl        # Extracted unit tests
+    ├── execution/
+    │   └── {num_sol}_sol_{num_ut}_ut_result.jsonl  # Execution results
+    └── selection/
+        └── select_in_{num_sol}_sol_by_{num_ut}_ut_max+vote.jsonl  # Selected solutions
+```
+
+## Performance Optimization
+
+### Parallelization Strategy
+
+1. **Inference**: Uses vLLM's built-in batching and tensor parallelism
+2. **Unit Test Execution**: Uses `ProcessPoolExecutor` with `mp_num` workers
+3. **Chunking**: Processes data in chunks to manage memory efficiently
+
+### Speed Improvements Over Original Pipeline
+
+1. **Eliminated Intermediate Files**: No need to merge outputs from multiple processes
+2. **In-Memory Processing**: Reduces I/O overhead
+3. **Parallel Execution**: All steps are optimized for parallel processing
+4. **Single Script**: No need to run multiple separate scripts
+
+## Error Handling
+
+The script includes comprehensive error handling:
+
+- **GPU Detection**: Falls back to default GPU if nvidia-smi fails
+- **File Operations**: Checks for file existence and handles overwrites
+- **Process Timeouts**: Each unit test has timeout protection
+- **Logging**: All errors are logged with full stack traces
+
+## Logging
+
+Logging is configured to write to both console and file:
+
+- **Format**: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`
+- **Timestamp**: Included in every log message
+- **Levels**: DEBUG, INFO, WARNING, ERROR
+- **File**: Defaults to `{output_dir}/{benchmark}/eval.log`
+
+## GPU Memory Management for unified_eval.py
+
+This section describes how to manage GPU memory when running the CodeRM evaluation pipeline with `unified_eval.py`. It covers quantization, free GPU detection, and vLLM parameters tuned for common GPU sizes.
+
+---
+
+### 1. Quantization
+
+Quantization reduces model precision to lower VRAM usage. Use `--quantization` to enable it.
+
+#### Options
+
+| Option | Use Case | VRAM Savings | Notes |
+|-------|----------|--------------|-------|
+| `bitsandbytes` | Any model | ~50% (FP16→4-bit) | Dynamic 4-bit quantization. Works with any HuggingFace model. Requires `bitsandbytes` package. |
+| `awq` | Pre-quantized models | ~75% | Use models already quantized with AWQ (e.g. from TheBloke, RedHat AI on HuggingFace). |
+| `gptq` | Pre-quantized models | ~75% | Use models already quantized with GPTQ. |
+
+#### Examples
 
 ```bash
-evalplus.evaluate humaneval --samples output/humaneval/llama-8b-instruct_sol_coderm_ut/details/select_in_100_sol_by_100_ut_max+vote.jsonl --parallel 8
+# 4-bit quantization for any model (recommended for 8–16GB GPUs)
+python unified_eval.py --model_path KAKA22/CodeRM-8B --quantization bitsandbytes ...
+
+# Pre-quantized AWQ model (if available for your model)
+python unified_eval.py --model_path path/to/model-AWQ --quantization awq ...
+
+# Pre-quantized GPTQ model
+python unified_eval.py --model_path path/to/model-GPTQ --quantization gptq ...
 ```
 
-If you ran into resource exhausted error, add this macro `EVALPLUS_MAX_MEMORY_BYTES=-1` before the above bash command
+#### Dependencies
 
-## Citation
+- **bitsandbytes**: `pip install bitsandbytes` (already in requirements.txt)
+- **awq/gptq**: Use models from HuggingFace that are published in AWQ/GPTQ format
 
-If you find our dataset helpful, please cite the original paper:
+---
+
+### 2. Free GPU Detection Threshold
+
+The script selects GPUs with at least a given amount of free memory (in MiB). The threshold is used in `get_free_gpus(threshold=...)` and is **hardcoded** at 8192 MiB (8 GB) in `run_inference()`.
+
+#### Current Behavior
+
+- Default threshold: **8192 MiB (8 GB)**
+- GPUs with less free memory are skipped
+- Location: `unified_eval.py` line ~303: `free_gpus = get_free_gpus(threshold=8192)`
+
+#### Adjusting the Threshold
+
+**Option A: Edit the code**
+
+In `unified_eval.py`, change the threshold in the `run_inference` function:
+
+```python
+# More lenient (e.g. 4 GB) – useful when other processes use GPU
+free_gpus = get_free_gpus(threshold=4096)
+
+# Stricter (e.g. 16 GB) – for large models or multi-GPU
+free_gpus = get_free_gpus(threshold=16384)
 ```
-@misc{ma2025coderm,
-      title={Dynamic Scaling of Unit Tests for Code Reward Modeling}, 
-      author={Zeyao Ma and Xiaokang Zhang and Jing Zhang and Jifan Yu and Sijia Luo and Jie Tang},
-      year={2025},
-      eprint={2501.01054},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2501.01054}, 
-}
+
+**Option B: Add a CLI argument**
+
+Add to the argument parser:
+
+```python
+parser.add_argument("--gpu_memory_threshold", type=int, default=8192,
+                    help="Minimum free GPU memory (MiB) to consider a GPU available")
 ```
 
-## Contact
+Then in `run_inference`:
 
-If you have any problems, feel free to raise an issue or reach out to us via email at: <zeyaoma@gmail.com>.
+```python
+free_gpus = get_free_gpus(threshold=config.gpu_memory_threshold)
+```
+
+#### Suggested Thresholds by Scenario
+
+| Scenario | Threshold (MiB) | Notes |
+|---------|-----------------|-------|
+| Shared GPU, light load | 4096 (4 GB) | Other processes may use the rest |
+| Dedicated GPU, 8B model | 8192 (8 GB) | Default |
+| Dedicated GPU, 13B+ model | 12288 (12 GB) | Avoid GPUs with little headroom |
+| Multi-GPU, large model | 16384 (16 GB) | Ensure enough free memory per GPU |
+
+---
+
+### 3. vLLM Parameters by GPU Size
+
+Tune these parameters based on your GPU VRAM. All can be set via command-line arguments.
+
+#### Parameter Overview
+
+| Parameter | Default | Effect | Trade-off |
+|-----------|---------|--------|-----------|
+| `--gpu_memory_utilization` | 0.8 | Fraction of GPU memory vLLM may use | Higher = more KV cache, more OOM risk |
+| `--max_model_len` | 2048 | Max context length | Lower = less KV cache, less memory |
+| `--max_num_seqs` | 64 | Max batch size | Lower = less memory, slower inference |
+| `--enforce_eager` | True | Disable CUDA graphs | True = less memory, slightly slower |
+| `--quantization` | None | 4-bit or pre-quantized | Reduces model weight memory |
+| `--tensor_parallel_size` | 1 | Split model across GPUs | >1 for models that don’t fit on one GPU |
+
+### 8 GB GPU (e.g. RTX 3070, RTX 4060)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --quantization bitsandbytes \
+  --gpu_memory_utilization 0.75 \
+  --max_model_len 2048 \
+  --max_num_seqs 16 \
+  --enforce_eager \
+  ...
+```
+
+- Use **bitsandbytes** quantization
+- Lower `gpu_memory_utilization` (0.7–0.75)
+- Lower `max_num_seqs` (8–16)
+- Keep `enforce_eager` (default)
+
+#### 12 GB GPU (e.g. RTX 3060 12GB, RTX 4070)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --quantization bitsandbytes \
+  --gpu_memory_utilization 0.8 \
+  --max_model_len 2048 \
+  --max_num_seqs 32 \
+  --enforce_eager \
+  ...
+```
+
+- Quantization still recommended for 8B models
+- Can increase `max_num_seqs` to 24–32
+
+#### 16–24 GB GPU (e.g. RTX 4080, RTX 4090, A10)
+
+```bash
+# 8B model – no quantization needed
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.85 \
+  --max_model_len 2048 \
+  --max_num_seqs 64 \
+  --enforce_eager \
+  ...
+
+# 8B model – faster with CUDA graphs (if OOM, add --enforce_eager)
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.9 \
+  --max_model_len 4096 \
+  --max_num_seqs 64 \
+  --no-enforce_eager \
+  ...
+```
+
+- 8B fits without quantization
+- Can try `--no-enforce_eager` for speed
+- Can raise `max_model_len` to 4096 if needed
+
+#### 40–48 GB GPU (e.g. A100 40GB, A6000)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.95 \
+  --max_model_len 8192 \
+  --max_num_seqs 128 \
+  --no-enforce_eager \
+  ...
+```
+
+- High utilization (0.9–0.95)
+- Larger `max_model_len` and `max_num_seqs`
+- CUDA graphs usually safe
+
+#### 80 GB GPU (e.g. A100 80GB, H100)
+
+```bash
+python unified_eval.py \
+  --model_path KAKA22/CodeRM-8B \
+  --gpu_memory_utilization 0.98 \
+  --max_model_len 16384 \
+  --max_num_seqs 256 \
+  --no-enforce_eager \
+  ...
+```
+
+- Near-maximum utilization
+- Large context and batch sizes
+
+#### Multi-GPU (Tensor Parallelism)
+
+For models that don’t fit on one GPU (e.g. 70B):
+
+```bash
+python unified_eval.py \
+  --model_path meta-llama/Llama-3-70B-Instruct \
+  --tensor_parallel_size 2 \
+  --num_gpus 2 \
+  --gpu_memory_utilization 0.9 \
+  ...
+```
+
+- Set `tensor_parallel_size` and `num_gpus` to the number of GPUs
+- Ensure `get_free_gpus` threshold is high enough for all GPUs
+
+---
+
+### 4. Quick Reference
+
+| GPU VRAM | Quantization | gpu_memory_util | max_num_seqs | enforce_eager |
+|----------|--------------|-----------------|--------------|---------------|
+| 8 GB     | bitsandbytes | 0.70–0.75       | 8–16         | Yes           |
+| 12 GB    | bitsandbytes | 0.75–0.80       | 24–32        | Yes           |
+| 16 GB    | Optional     | 0.80–0.85       | 48–64        | Yes           |
+| 24 GB    | No           | 0.85–0.90       | 64           | Optional      |
+| 40+ GB   | No           | 0.90–0.95       | 128+         | No            |
+| 80 GB    | No           | 0.95–0.98       | 256+         | No            |
+
+---
+
+### 5. Troubleshooting
+
+#### OOM (Out of Memory)
+
+1. Enable quantization: `--quantization bitsandbytes`
+2. Lower `--gpu_memory_utilization` (e.g. 0.6–0.7)
+3. Lower `--max_num_seqs` (e.g. 8 or 16)
+4. Lower `--max_model_len` (e.g. 1024)
+5. Ensure `--enforce_eager` is set (default)
+
+#### "No GPUs available with sufficient free memory"
+
+- Lower the free-GPU threshold in `get_free_gpus(threshold=...)` (e.g. 4096)
+- Free GPU memory: close other processes, `nvidia-smi` to inspect
+- Set `CUDA_VISIBLE_DEVICES` to a specific GPU: `export CUDA_VISIBLE_DEVICES=0`
+
+#### Slow Inference
+
+- Try `--no-enforce_eager` if you have enough VRAM
+- Increase `--max_num_seqs` if memory allows
+- Increase `--gpu_memory_utilization` (e.g. 0.9) if stable
+
+
+## Common Use Cases
+
+### 1. Full Evaluation Pipeline
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --benchmark humaneval \
+    --num_unit_tests 100 \
+    --num_solutions 100 \
+    --mp_num 16
+```
+
+### 2. Quick Test with Fewer Samples
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --num_unit_tests 10 \
+    --num_solutions 10 \
+    --skip_evalplus
+```
+
+### 3. Scaling Law Evaluation
+
+Generate 100 unit tests first:
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --num_unit_tests 100 \
+    --skip_evalplus
+```
+
+Then evaluate with different numbers using top-k sampling:
+
+```bash
+# Evaluate with 50 unit tests (top-50)
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --use_previous_ut \
+    --previous_ut_path output/humaneval/inference/raw_inference_results.jsonl \
+    --sample_top_k 50 \
+    --num_unit_tests 50
+
+# Evaluate with 25 unit tests (top-25)
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --use_previous_ut \
+    --previous_ut_path output/humaneval/inference/raw_inference_results.jsonl \
+    --sample_top_k 25 \
+    --num_unit_tests 25
+```
+
+## Best Practices
+
+1. **Start Small**: Test with `--num_unit_tests 10` and `--num_solutions 10` first
+2. **Monitor Logs**: Check log file for warnings and errors
+3. **Save Intermediate Results**: The script saves all intermediate results automatically
+4. **Use Previous Results**: For scaling law evaluation, generate once and sample multiple times
+5. **Parallelization**: Adjust `--mp_num` based on your CPU cores
+
+## Advanced Usage
+
+### Custom Logging
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --log_file custom/path/eval.log \
+    --log_level DEBUG
+```
+
+### Multi-GPU Inference
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
+    --solution_path data/result/humaneval+/sol_model_200.jsonl \
+    --num_gpus 4 \
+    --tensor_parallel_size 2
+```
+
+## Notes
+
+- The script automatically detects free GPUs and uses them
+- All intermediate files are saved for debugging and resumption
+- The script is designed to be idempotent (can be re-run safely)
+- Probability recording enables scaling law evaluation without re-generation
