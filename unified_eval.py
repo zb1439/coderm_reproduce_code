@@ -952,6 +952,79 @@ def select_solutions(
 
 # ==================== EvalPlus Evaluation ====================
 
+def _parse_evalplus_stdout(stdout: str) -> Dict[str, Dict[str, float]]:
+    """Parse pass@k results from EvalPlus stdout. Returns dict like {'base': {'pass@1': 0.714}, 'plus': {'pass@1': 0.634}}."""
+    results = {}
+    # Match lines like "pass@1:\t0.714" or "pass@10: 0.xxx"
+    # EvalPlus prints (base tests) first, then (base + extra tests)
+    lines = stdout.strip().split('\n')
+    current_suite = None
+    for line in lines:
+        line = line.strip()
+        if 'base tests' in line.lower() and 'extra' not in line.lower():
+            current_suite = 'base'
+            results[current_suite] = {}
+        elif 'base + extra' in line.lower() or 'humaneval+' in line.lower():
+            current_suite = 'plus'
+            results[current_suite] = {}
+        match = re.match(r'pass@(\d+)\s*:\s*([\d.]+)', line, re.IGNORECASE)
+        if match and current_suite:
+            k, val = match.group(1), float(match.group(2))
+            results[current_suite][f'pass@{k}'] = val
+    return results
+
+
+def _load_evalplus_results(selected_path: str) -> Optional[Dict[str, Any]]:
+    """Load pass_at_k from EvalPlus eval_results.json if it exists.
+    EvalPlus writes to either {base}_eval_results.json or {base}.eval_results.json."""
+    base = selected_path.replace(".jsonl", "")
+    for suffix in ("_eval_results.json", ".eval_results.json"):
+        path = base + suffix
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                return data.get('pass_at_k')
+            except (json.JSONDecodeError, IOError):
+                pass
+    return None
+
+
+def _log_final_eval_results(
+    parsed_stdout: Dict[str, Dict[str, float]],
+    selected_path: str,
+    logger: logging.Logger,
+    benchmark: str = "humaneval",
+):
+    """Log final evaluation results prominently."""
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("FINAL EVALUATION RESULTS")
+    logger.info("=" * 60)
+
+    # Prefer eval_results.json (authoritative) over parsed stdout
+    pass_at_k = _load_evalplus_results(selected_path)
+    bench = benchmark.upper().replace("+", "") if benchmark else ""
+
+    if pass_at_k:
+        for suite_name, metrics in pass_at_k.items():
+            display_name = f"{bench} (base tests)" if suite_name == "base" else f"{bench}+ (base + extra tests)"
+            logger.info(f"  {display_name}:")
+            for k, v in sorted(metrics.items(), key=lambda x: int(x[0].split('@')[1])):
+                logger.info(f"    {k}: {v:.3f}")
+    elif parsed_stdout:
+        for suite_name, metrics in parsed_stdout.items():
+            display_name = f"{bench} (base tests)" if suite_name == "base" else f"{bench}+ (base + extra tests)"
+            logger.info(f"  {display_name}:")
+            for k, v in sorted(metrics.items(), key=lambda x: int(x[0].split('@')[1])):
+                logger.info(f"    {k}: {v:.3f}")
+    else:
+        logger.info("  (Results could not be parsed)")
+
+    logger.info("=" * 60)
+    logger.info("")
+
+
 def run_evalplus(
     selected_path: str,
     config: EvalConfig,
@@ -1000,9 +1073,25 @@ def run_evalplus(
             check=True,
         )
         logger.info("EvalPlus evaluation completed successfully")
-        logger.info(result.stdout)
+
+        # Parse pass@k from stdout for display
+        parsed = _parse_evalplus_stdout(result.stdout)
+        if parsed:
+            logger.info("Pass@k from EvalPlus stdout:")
+            for suite, metrics in parsed.items():
+                for k, v in metrics.items():
+                    logger.info(f"  {suite}: {k} = {v:.3f}")
+
+        # Suppress verbose stderr (tqdm progress bars) - only log a brief summary
         if result.stderr:
-            logger.warning(f"EvalPlus stderr: {result.stderr}")
+            stderr_lines = result.stderr.strip().split('\n')
+            n_lines = len(stderr_lines)
+            if n_lines > 20:
+                logger.info(
+                    f"EvalPlus progress output: {n_lines} lines (tqdm progress bars suppressed)"
+                )
+            else:
+                logger.info(f"EvalPlus stderr: {result.stderr[:500]}")
     except subprocess.CalledProcessError as e:
         logger.error(f"EvalPlus evaluation failed: {e}")
         logger.error(f"stdout: {e.stdout}")
@@ -1014,6 +1103,9 @@ def run_evalplus(
     
     elapsed = time.time() - start_time
     logger.info(f"EvalPlus evaluation completed in {elapsed:.2f} seconds")
+
+    # Log final results prominently
+    _log_final_eval_results(parsed, selected_path, logger, config.benchmark)
 
 
 # ==================== Main Pipeline ====================
@@ -1246,6 +1338,16 @@ def main():
         logger.info(f"Total time: {total_elapsed:.2f} seconds")
         if selected_path:
             logger.info(f"Selected solutions: {selected_path}")
+        # Re-print final EvalPlus results at the very end for visibility
+        if selected_path and not config.skip_evalplus:
+            pass_at_k = _load_evalplus_results(selected_path)
+            if pass_at_k:
+                bench = config.benchmark.upper().replace("+", "")
+                logger.info("")
+                logger.info(">>> FINAL EVALUATION RESULTS <<<")
+                for suite_name, metrics in pass_at_k.items():
+                    name = f"{bench} (base)" if suite_name == "base" else f"{bench}+ (base+extra)"
+                    logger.info(f"  {name}: " + ", ".join(f"{k}={v:.3f}" for k, v in sorted(metrics.items(), key=lambda x: int(x[0].split('@')[1]))))
         
     except Exception as e:
         logger.error(f"Evaluation failed: {e}", exc_info=True)
