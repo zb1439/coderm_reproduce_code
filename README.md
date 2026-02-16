@@ -10,9 +10,9 @@ The `unified_eval.py` script provides a one-command solution for running the com
 
 ```bash
 python unified_eval.py \
-    --model_path /path/to/coderm-8b \
+    --model_path KAKA22/CodeRM-8B \
     --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
-    --solution_path data/result/humaneval+/sol_llama-8b-instruct_200.jsonl \
+    --solution_path data/result/humaneval+/sol_llama-8b-instruct_100_reproduce.jsonl \
     --benchmark humaneval \
     --num_unit_tests 100 \
     --num_solutions 100
