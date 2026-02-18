@@ -8,12 +8,39 @@ The `unified_eval.py` script provides a one-command solution for running the com
 
 ### Basic Usage
 
+HumanEval:
+
 ```bash
 python unified_eval.py \
     --model_path KAKA22/CodeRM-8B \
     --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
     --solution_path data/result/humaneval+/sol_llama-8b-instruct_100_reproduce.jsonl \
     --benchmark humaneval \
+    --num_unit_tests 100 \
+    --num_solutions 100
+```
+
+MBPP:
+
+```bash
+python unified_eval.py \
+    --model_path KAKA22/CodeRM-8B \
+    --prompt_path data/benchmark/input_mbpp+_ut.jsonl \
+    --solution_path data/result/mbpp+/sol_llama-8b-instruct_100.jsonl \
+    --benchmark mbpp \
+    --num_unit_tests 100 \
+    --num_solutions 100
+```
+
+LiveCodeBench (requires `--anno_path` for ground truth annotation):
+
+```bash
+python unified_eval.py \
+    --model_path KAKA22/CodeRM-8B \
+    --prompt_path data/benchmark/input_livecodebench_ut.jsonl \
+    --solution_path data/result/livecodebench/sol_llama-8b-instruct_100.jsonl \
+    --benchmark livecodebench \
+    --anno_path data/result/livecodebench/sol_llama-8b-instruct_100_anno.jsonl \
     --num_unit_tests 100 \
     --num_solutions 100
 ```
@@ -130,19 +157,39 @@ python unified_eval.py \
 **Output**:
 - Selected solutions saved to `output/{benchmark}/selection/select_in_{num_sol}_sol_by_{num_ut}_ut_max+vote.jsonl`
 
-### 5. EvalPlus Evaluation (`run_evalplus`)
+### 5. Final Evaluation (`run_evalplus` / `run_livecodebench_eval`)
 
-**Location**: Lines 682-720
+**Purpose**: Computes pass@1 on the selected solutions. The evaluation method depends on the benchmark:
 
-**Purpose**: Runs official EvalPlus evaluation to compute pass@1.
+| Benchmark | Evaluation Method | Function |
+|-----------|------------------|----------|
+| humaneval | EvalPlus (`evalplus.evaluate`) | `run_evalplus()` |
+| mbpp | EvalPlus (`evalplus.evaluate`) | `run_evalplus()` |
+| livecodebench | Anno-based ground truth lookup | `run_livecodebench_eval()` |
 
-**Key Features**:
+**HumanEval / MBPP** (EvalPlus):
 - Calls `evalplus.evaluate` command
 - Sets `EVALPLUS_MAX_MEMORY_BYTES=-1` to avoid memory errors
 - Supports parallel execution
 
+**LiveCodeBench** (anno-based):
+- Looks up each selected solution's `sol_id` in the anno file to determine pass/fail
+- When multiple solutions are selected for a task (majority-voting tie), accuracy is the fraction that pass
+- Requires `--anno_path` pointing to the anno JSONL file
+
+**Anno File Format** (LiveCodeBench):
+```json
+{
+  "task_id": "123",
+  "solutions": [
+    {"sol_id": 0, "result": "pass"},
+    {"sol_id": 1, "result": "fail"}
+  ]
+}
+```
+
 **Output**:
-- EvalPlus results printed to console and log file
+- pass@1 results printed to console and log file
 
 ### 6. Top-p/Top-k Sampling (`load_previous_and_sample`)
 
@@ -166,6 +213,8 @@ python unified_eval.py \
 - `--model_path`: Path to the model for unit test generation
 - `--prompt_path`: Path to prompt JSONL file (e.g., `data/benchmark/input_humaneval+_ut.jsonl`)
 - `--solution_path`: Path to solution JSONL file
+- `--benchmark`: Benchmark name (`humaneval`, `mbpp`, or `livecodebench`)
+- `--anno_path`: Path to anno JSONL file (required for `livecodebench` only)
 
 ### Inference Parameters
 
@@ -505,12 +554,28 @@ python unified_eval.py \
 
 ### 1. Full Evaluation Pipeline
 
+HumanEval / MBPP:
+
 ```bash
 python unified_eval.py \
     --model_path /path/to/model \
     --prompt_path data/benchmark/input_humaneval+_ut.jsonl \
     --solution_path data/result/humaneval+/sol_model_200.jsonl \
     --benchmark humaneval \
+    --num_unit_tests 100 \
+    --num_solutions 100 \
+    --mp_num 16
+```
+
+LiveCodeBench:
+
+```bash
+python unified_eval.py \
+    --model_path /path/to/model \
+    --prompt_path data/benchmark/input_livecodebench_ut.jsonl \
+    --solution_path data/result/livecodebench/sol_model_100.jsonl \
+    --benchmark livecodebench \
+    --anno_path data/result/livecodebench/sol_model_100_anno.jsonl \
     --num_unit_tests 100 \
     --num_solutions 100 \
     --mp_num 16
@@ -603,3 +668,4 @@ python unified_eval.py \
 - All intermediate files are saved for debugging and resumption
 - The script is designed to be idempotent (can be re-run safely)
 - Probability recording enables scaling law evaluation without re-generation
+- LiveCodeBench uses anno-based evaluation instead of EvalPlus; pass `--anno_path` with the ground truth file

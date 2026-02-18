@@ -100,6 +100,9 @@ class EvalConfig:
     evalplus_parallel: int = 8
     skip_evalplus: bool = False
 
+    # LiveCodeBench evaluation
+    anno_path: Optional[str] = None  # Path to anno file (sol_*_anno.jsonl) for LiveCodeBench evaluation
+
 
 # ==================== Logging Setup ====================
 
@@ -934,6 +937,7 @@ def select_solutions(
                 output.append({
                     "task_id": task_id,
                     "solution": solutions[sol_id],
+                    "sol_id": sol_id,
                 })
     
     # Save selected solutions
@@ -1025,6 +1029,106 @@ def _log_final_eval_results(
     logger.info("")
 
 
+# ==================== LiveCodeBench Evaluation ====================
+
+def run_livecodebench_eval(
+    selected_path: str,
+    config: EvalConfig,
+    logger: logging.Logger,
+):
+    """Evaluate selected solutions against LiveCodeBench anno (ground truth).
+
+    For each task, the selected solution's sol_id is looked up in the anno file
+    to determine pass/fail.  When multiple solutions are selected for a task
+    (majority-voting tie), accuracy is the fraction that pass — consistent with
+    calculate_result.py.
+    """
+    logger.info("=" * 60)
+    logger.info("STEP 5: Running LiveCodeBench Evaluation (anno lookup)")
+    logger.info("=" * 60)
+
+    if not config.anno_path:
+        raise ValueError(
+            "LiveCodeBench evaluation requires --anno_path pointing to "
+            "the anno JSONL file (e.g. sol_llama3-8b_100_anno.jsonl)."
+        )
+
+    start_time = time.time()
+
+    # Load anno → build lookup {task_id: {sol_id: "pass"/"fail"}}
+    anno_data = load_jsonl(config.anno_path)
+    anno_lookup: Dict[str, Dict[int, str]] = {}
+    for entry in anno_data:
+        task_id = str(entry["task_id"])
+        anno_lookup[task_id] = {}
+        for sol in entry["solutions"]:
+            anno_lookup[task_id][sol["sol_id"]] = sol["result"]
+    logger.info(f"Loaded anno for {len(anno_lookup)} tasks from {config.anno_path}")
+
+    # Load selected solutions
+    selected = load_jsonl(selected_path)
+    logger.info(f"Loaded {len(selected)} selected solutions from {selected_path}")
+
+    # Group by task_id (a task may have multiple selected solutions on tie)
+    from collections import defaultdict
+    task_selections: Dict[str, List[int]] = defaultdict(list)
+    for entry in selected:
+        task_id = str(entry["task_id"])
+        sol_id = entry.get("sol_id")
+        if sol_id is None:
+            logger.warning(f"task_id={task_id}: missing sol_id in selection output, skipping")
+            continue
+        task_selections[task_id].append(sol_id)
+
+    # Calculate accuracy
+    total_tasks = len(task_selections)
+    total_accuracy = 0.0
+    pass_count = 0
+    fail_count = 0
+    missing_count = 0
+
+    for task_id, sol_ids in task_selections.items():
+        if task_id not in anno_lookup:
+            logger.warning(f"task_id={task_id}: not found in anno, treating as fail")
+            missing_count += 1
+            continue
+
+        # For each selected solution, check ground truth
+        task_pass = 0
+        for sol_id in sol_ids:
+            result = anno_lookup[task_id].get(sol_id, "fail")
+            if result == "pass":
+                task_pass += 1
+
+        # Accuracy contribution: fraction of selected solutions that pass
+        task_accuracy = task_pass / len(sol_ids)
+        total_accuracy += task_accuracy
+        if task_accuracy > 0:
+            pass_count += 1
+        else:
+            fail_count += 1
+
+    accuracy = total_accuracy / total_tasks if total_tasks > 0 else 0.0
+
+    elapsed = time.time() - start_time
+
+    # Log results
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("LIVECODEBENCH EVALUATION RESULTS")
+    logger.info("=" * 60)
+    logger.info(f"  Total tasks evaluated: {total_tasks}")
+    logger.info(f"  Tasks with passing solution: {pass_count}")
+    logger.info(f"  Tasks with failing solution: {fail_count}")
+    if missing_count:
+        logger.info(f"  Tasks missing from anno: {missing_count}")
+    logger.info(f"  pass@1: {accuracy:.4f}")
+    logger.info("=" * 60)
+    logger.info(f"LiveCodeBench evaluation completed in {elapsed:.2f} seconds")
+
+    return {"pass@1": accuracy}
+
+
 def run_evalplus(
     selected_path: str,
     config: EvalConfig,
@@ -1034,20 +1138,15 @@ def run_evalplus(
     logger.info("=" * 60)
     logger.info("STEP 5: Running EvalPlus Evaluation")
     logger.info("=" * 60)
-    
+
     if config.skip_evalplus:
         logger.info("Skipping EvalPlus evaluation (--skip_evalplus flag set)")
         return
-    
-    # TODO: Implement EvalPlus evaluation for livecodebench benchmark
+
+    # LiveCodeBench uses anno-based evaluation instead of EvalPlus
     if config.benchmark == "livecodebench":
-        error_msg = (
-            f"EvalPlus evaluation for livecodebench benchmark is not yet implemented.\n"
-            f"Please use --skip_evalplus to skip this step, or implement livecodebench support."
-        )
-        logger.error(error_msg)
-        raise NotImplementedError(error_msg)
-    
+        return run_livecodebench_eval(selected_path, config, logger)
+
     start_time = time.time()
     
     # Run evalplus (use python -m for reliable invocation across environments)
@@ -1208,7 +1307,11 @@ def main():
                        help="Number of parallel processes for EvalPlus")
     parser.add_argument("--skip_evalplus", action="store_true",
                        help="Skip EvalPlus evaluation")
-    
+
+    # LiveCodeBench parameters
+    parser.add_argument("--anno_path", type=str, default=None,
+                       help="Path to anno JSONL file for LiveCodeBench evaluation (e.g. sol_llama3-8b_100_anno.jsonl)")
+
     # Resume support
     parser.add_argument("--resume_from", type=str, default=None,
                        choices=["inference", "unit_tests", "execution", "selection", "evalplus"],
@@ -1338,16 +1441,20 @@ def main():
         logger.info(f"Total time: {total_elapsed:.2f} seconds")
         if selected_path:
             logger.info(f"Selected solutions: {selected_path}")
-        # Re-print final EvalPlus results at the very end for visibility
+        # Re-print final results at the very end for visibility
         if selected_path and not config.skip_evalplus:
-            pass_at_k = _load_evalplus_results(selected_path)
-            if pass_at_k:
-                bench = config.benchmark.upper().replace("+", "")
-                logger.info("")
-                logger.info(">>> FINAL EVALUATION RESULTS <<<")
-                for suite_name, metrics in pass_at_k.items():
-                    name = f"{bench} (base)" if suite_name == "base" else f"{bench}+ (base+extra)"
-                    logger.info(f"  {name}: " + ", ".join(f"{k}={v:.3f}" for k, v in sorted(metrics.items(), key=lambda x: int(x[0].split('@')[1]))))
+            if config.benchmark == "livecodebench":
+                # LiveCodeBench results already logged by run_livecodebench_eval()
+                pass
+            else:
+                pass_at_k = _load_evalplus_results(selected_path)
+                if pass_at_k:
+                    bench = config.benchmark.upper().replace("+", "")
+                    logger.info("")
+                    logger.info(">>> FINAL EVALUATION RESULTS <<<")
+                    for suite_name, metrics in pass_at_k.items():
+                        name = f"{bench} (base)" if suite_name == "base" else f"{bench}+ (base+extra)"
+                        logger.info(f"  {name}: " + ", ".join(f"{k}={v:.3f}" for k, v in sorted(metrics.items(), key=lambda x: int(x[0].split('@')[1]))))
         
     except Exception as e:
         logger.error(f"Evaluation failed: {e}", exc_info=True)
