@@ -157,6 +157,13 @@ def load_jsonl(filename: str) -> List[Dict]:
         return [json.loads(line) for line in f]
 
 
+def _get_solution_code(sol_item: Any) -> str:
+    """Extract solution code string from item (dict with 'solution' key or raw string)."""
+    if isinstance(sol_item, dict):
+        return sol_item.get("solution", "")
+    return str(sol_item)
+
+
 def save_jsonl(filename: str, dataset: List[Dict], overwrite: bool = False):
     """Save data to JSONL file"""
     if os.path.exists(filename) and not overwrite:
@@ -801,7 +808,7 @@ def execute_unit_tests(
         
         for sol_id in range(len(solutions)):
             for ut_id in range(len(unit_tests)):
-                code = solutions[sol_id] + "\n\n" + unit_tests[ut_id]
+                code = _get_solution_code(solutions[sol_id]) + "\n\n" + unit_tests[ut_id]
                 output.append({
                     "task_id": task_id,
                     "sol_id": sol_id,
@@ -923,18 +930,43 @@ def select_solutions(
                 current_task = dataset[dataset_idx]["task_id"]
                 solution_dict = {i: set() for i in range(config.num_solutions)}
     
-    # Create output
+    # Create output from chosen solutions (tasks with execution results)
     output = []
+    tasks_with_chosen = set()
     for chosen_sol_entry in chosen_solution:
         task_id = chosen_sol_entry["task_id"]
         if task_id in task_id_to_sol_entry:
+            unique_sols = set()
             solutions = task_id_to_sol_entry[task_id]["solutions"]
             sol_id = chosen_sol_entry["chosen_solution"]
             if sol_id < len(solutions):
-                output.append({
-                    "task_id": task_id,
-                    "solution": solutions[sol_id],
-                })
+                sol = _get_solution_code(solutions[sol_id])
+                if sol not in unique_sols:
+                    unique_sols.add(sol)
+                    output.append({
+                        "task_id": task_id,
+                        "solution": sol,
+                    })
+                    tasks_with_chosen.add(task_id)
+    
+    # Fallback: for tasks with no execution results (e.g. empty unit_tests due to
+    # extraction failures), use the first solution so the output covers the full
+    # problem set. EvalPlus asserts len(completion_id) == len(problems).
+    missing_tasks = set(task_id_to_sol_entry.keys()) - tasks_with_chosen
+    if missing_tasks:
+        logger.warning(
+            f"Adding fallback (first solution) for {len(missing_tasks)} tasks with no "
+            f"execution results: {sorted(missing_tasks)[:5]}{'...' if len(missing_tasks) > 5 else ''}"
+        )
+        for task_id in sorted(missing_tasks):
+            entry = task_id_to_sol_entry[task_id]
+            solutions = entry["solutions"]
+            if solutions:
+                sol = _get_solution_code(solutions[0])
+                output.append({"task_id": task_id, "solution": sol})
+    
+    # Sort output by task_id for consistent ordering (matches problem set)
+    output.sort(key=lambda x: (int(x["task_id"].split("/")[1]) if "/" in x["task_id"] else 0))
     
     # Save selected solutions
     output_dir = os.path.join(config.output_dir, config.benchmark, "selection")
