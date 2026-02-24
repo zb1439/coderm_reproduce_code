@@ -82,6 +82,7 @@ class EvalConfig:
     chunk_size: int = 1000
     time_limit_seconds: float = 1.0
     save_details: bool = False
+    combine_dump_interval: int = 50 * 100 * 100  # Dump sol+ut pairs to disk every N items to save memory
     
     # Top-p/top-k sampling from previous results
     use_previous_ut: bool = False
@@ -798,33 +799,46 @@ def execute_unit_tests(
     sol_dict = {item['task_id']: item for item in sol_dataset}
     ut_dict = {item['task_id']: item for item in ut_dataset}
     
-    # Combine solutions and unit tests
-    logger.info("Combining solutions and unit tests")
-    output = []
-    for task_id in tqdm(sorted(sol_dict.keys()), desc="Combining"):
-        if task_id not in ut_dict:
-            logger.warning(f"Task {task_id} not found in unit tests")
-            continue
-        
-        solutions = sol_dict[task_id]['solutions'][:config.num_solutions]
-        unit_tests = ut_dict[task_id]['unit_tests'][:config.num_unit_tests]
-        
-        for sol_id in range(len(solutions)):
-            for ut_id in range(len(unit_tests)):
-                code = _get_solution_code(solutions[sol_id]) + "\n\n" + unit_tests[ut_id]
-                output.append({
-                    "task_id": task_id,
-                    "sol_id": sol_id,
-                    "ut_id": ut_id,
-                    "code": code,
-                })
-    
-    # Save combined file
+    # Combine solutions and unit tests (stream to disk periodically to save memory)
     output_dir = os.path.join(config.output_dir, config.benchmark, "execution")
     os.makedirs(output_dir, exist_ok=True)
     combined_path = os.path.join(output_dir, "sol_ut_combined.jsonl")
-    save_jsonl(combined_path, output, overwrite=True)
-    logger.info(f"Created {len(output)} solution-unit test pairs")
+    dump_interval = config.combine_dump_interval
+
+    logger.info(f"Combining solutions and unit tests (dumping every {dump_interval} pairs)")
+    total_pairs = 0
+    buffer: List[Dict] = []
+
+    with open(combined_path, "w", encoding="utf-8") as fp:
+        for task_id in tqdm(sorted(sol_dict.keys()), desc="Combining"):
+            if task_id not in ut_dict:
+                logger.warning(f"Task {task_id} not found in unit tests")
+                continue
+
+            solutions = sol_dict[task_id]['solutions'][:config.num_solutions]
+            unit_tests = ut_dict[task_id]['unit_tests'][:config.num_unit_tests]
+
+            for sol_id in range(len(solutions)):
+                for ut_id in range(len(unit_tests)):
+                    code = _get_solution_code(solutions[sol_id]) + "\n\n" + unit_tests[ut_id]
+                    buffer.append({
+                        "task_id": task_id,
+                        "sol_id": sol_id,
+                        "ut_id": ut_id,
+                        "code": code,
+                    })
+                    total_pairs += 1
+
+                    if len(buffer) >= dump_interval:
+                        for item in buffer:
+                            fp.write(json.dumps(item, ensure_ascii=False) + "\n")
+                        buffer.clear()
+
+        # Flush remaining buffer
+        for item in buffer:
+            fp.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    logger.info(f"Created {total_pairs} solution-unit test pairs")
     
     # Execute unit tests
     result_path = os.path.join(output_dir, f"{config.num_solutions}_sol_{config.num_unit_tests}_ut_result.jsonl")
@@ -1310,6 +1324,8 @@ def main():
                        help="Chunk size for processing")
     parser.add_argument("--time_limit_seconds", type=float, default=1.0,
                        help="Time limit per unit test execution")
+    parser.add_argument("--combine_dump_interval", type=int, default=50 * 100 * 100,
+                       help="Dump sol+ut pairs to disk every N items (default 500000) to save memory")
     parser.add_argument("--save_details", action="store_true",
                        help="Save detailed execution results")
     
