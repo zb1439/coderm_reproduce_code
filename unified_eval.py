@@ -34,7 +34,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from operator import itemgetter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from multiprocessing import Value, Array
 from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
@@ -81,6 +81,7 @@ class EvalConfig:
     mp_num: int = 8
     chunk_size: int = 1000
     time_limit_seconds: float = 1.0
+    execution_timeout_seconds: float = 30.0  # Per-unit-test timeout; tests exceeding this are marked fail
     save_details: bool = False
     combine_dump_interval: int = 50 * 100 * 100  # Dump sol+ut pairs to disk every N items to save memory
     
@@ -99,6 +100,7 @@ class EvalConfig:
     
     # EvalPlus parameters
     evalplus_parallel: int = 8
+    evalplus_timeout: float = 120  # Per-solution timeout (seconds); timeouts count as not passing
     skip_evalplus: bool = False
 
     # LiveCodeBench evaluation
@@ -721,6 +723,7 @@ def run_unit_tests(
     recover: int = 0,
     details: bool = False,
     time_limit_seconds: float = 1,
+    execution_timeout_seconds: float = 30,
     logger: Optional[logging.Logger] = None,
 ):
     """Run unit tests in parallel"""
@@ -740,25 +743,44 @@ def run_unit_tests(
         
         max_workers = mp_num or max(1, multiprocessing.cpu_count() // 2)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+            future_to_data = {}
             for data in tqdm(chunk, desc="Scheduling unit tests", leave=False):
-                futures.append(
-                    executor.submit(
-                        handle_execute,
-                        data["task_id"],
-                        data["sol_id"],
-                        data["ut_id"],
-                        data["code"],
-                        time_limit_seconds,
-                        details,
-                    )
+                future = executor.submit(
+                    handle_execute,
+                    data["task_id"],
+                    data["sol_id"],
+                    data["ut_id"],
+                    data["code"],
+                    time_limit_seconds,
+                    details,
                 )
+                future_to_data[future] = data
             
             raw_results = []
             for future in tqdm(
-                as_completed(futures), total=len(futures), desc="Collecting results", leave=False
+                as_completed(future_to_data.keys()), total=len(future_to_data), desc="Collecting results", leave=False
             ):
-                task_id, solution_id, test_case_id, is_pass, details_payload = future.result()
+                data = future_to_data[future]
+                try:
+                    task_id, solution_id, test_case_id, is_pass, details_payload = future.result(
+                        timeout=execution_timeout_seconds
+                    )
+                except FuturesTimeoutError:
+                    if logger:
+                        logger.warning(
+                            f"Unit test timed out after {execution_timeout_seconds}s: "
+                            f"task_id={data['task_id']} sol_id={data['sol_id']} ut_id={data['ut_id']} (marking as fail)"
+                        )
+                    raw_results.append(
+                        {
+                            "task_id": data["task_id"],
+                            "sol_id": data["sol_id"],
+                            "ut_id": data["ut_id"],
+                            "result": "fail",
+                            "details": {"total_num": 0, "pass_num": 0, "fail_num": 1, "error_num": 0, "text": "Execution timeout"},
+                        }
+                    )
+                    continue
                 raw_results.append(
                     {
                         "task_id": task_id,
@@ -839,18 +861,23 @@ def execute_unit_tests(
             fp.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     logger.info(f"Created {total_pairs} solution-unit test pairs")
-    
-    # Execute unit tests
+
+    # Free memory before execution (combined file is on disk, no longer needed)
+    del sol_dataset, ut_dataset, sol_dict, ut_dict
+
+    # Execute unit tests (smaller chunk = less memory; reuse combine_dump_interval)
     result_path = os.path.join(output_dir, f"{config.num_solutions}_sol_{config.num_unit_tests}_ut_result.jsonl")
-    logger.info(f"Executing unit tests with {config.mp_num} processes")
+    exec_chunk = min(config.chunk_size, max(100, config.combine_dump_interval // 1000))
+    logger.info(f"Executing unit tests with {config.mp_num} processes (chunk={exec_chunk})")
     run_unit_tests(
         input_path=combined_path,
         output_path=result_path,
         mp_num=config.mp_num,
-        chunk_size=config.chunk_size,
+        chunk_size=exec_chunk,
         recover=0,
         details=config.save_details,
         time_limit_seconds=config.time_limit_seconds,
+        execution_timeout_seconds=config.execution_timeout_seconds,
         logger=logger,
     )
     
@@ -948,23 +975,33 @@ def select_solutions(
                 solution_dict = {i: set() for i in range(config.num_solutions)}
     
     # Create output from chosen solutions (tasks with execution results)
+    # Deduplicate by solution text per task AFTER voting - same problem with identical
+    # solution code (e.g. from different sol_ids) is kept only once
     output = []
     tasks_with_chosen = set()
+    seen_solution_per_task: Dict[str, set] = {}  # task_id -> set of solution text
+    n_duplicates_skipped = 0
     for chosen_sol_entry in chosen_solution:
         task_id = chosen_sol_entry["task_id"]
-        if task_id in task_id_to_sol_entry:
-            unique_sols = set()
-            solutions = task_id_to_sol_entry[task_id]["solutions"]
-            sol_id = chosen_sol_entry["chosen_solution"]
-            if sol_id < len(solutions):
-                sol = _get_solution_code(solutions[sol_id])
-                if sol not in unique_sols:
-                    unique_sols.add(sol)
-                    output.append({
-                        "task_id": task_id,
-                        "solution": sol,
-                    })
-                    tasks_with_chosen.add(task_id)
+        if task_id not in task_id_to_sol_entry:
+            continue
+        if task_id not in seen_solution_per_task:
+            seen_solution_per_task[task_id] = set()
+        solutions = task_id_to_sol_entry[task_id]["solutions"]
+        sol_id = chosen_sol_entry["chosen_solution"]
+        if sol_id < len(solutions):
+            sol = _get_solution_code(solutions[sol_id])
+            if sol not in seen_solution_per_task[task_id]:
+                seen_solution_per_task[task_id].add(sol)
+                output.append({
+                    "task_id": task_id,
+                    "solution": sol,
+                })
+                tasks_with_chosen.add(task_id)
+            else:
+                n_duplicates_skipped += 1
+    if n_duplicates_skipped:
+        logger.info(f"Removed {n_duplicates_skipped} duplicate solutions (same task + identical code) after voting")
     
     # Fallback: for tasks with no execution results (e.g. empty unit_tests due to
     # extraction failures), use the first solution so the output covers the full
@@ -1202,6 +1239,7 @@ def run_evalplus(
         "--samples", selected_path,
         "--parallel", str(config.evalplus_parallel),
     ]
+    cmd.extend(["--timeout", str(int(config.evalplus_timeout))])
     
     logger.info(f"Running command: {' '.join(cmd)}")
     
@@ -1352,6 +1390,8 @@ def main():
     # EvalPlus parameters
     parser.add_argument("--evalplus_parallel", type=int, default=8,
                        help="Number of parallel processes for EvalPlus")
+    parser.add_argument("--evalplus_timeout", type=float, default=120,
+                       help="Per-solution timeout in seconds; solutions exceeding this are marked as not passing (default: 120)")
     parser.add_argument("--skip_evalplus", action="store_true",
                        help="Skip EvalPlus evaluation")
 
