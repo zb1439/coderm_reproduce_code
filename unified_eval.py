@@ -19,6 +19,7 @@ It supports:
 import os
 import sys
 import json
+import random
 import re
 import ast
 import time
@@ -102,6 +103,7 @@ class EvalConfig:
     evalplus_parallel: int = 8
     evalplus_timeout: float = 120  # Per-solution timeout (seconds); timeouts count as not passing
     skip_evalplus: bool = False
+    eval_single_random: bool = False  # If True, randomly pick one solution per task for eval (speeds up EvalPlus)
 
     # LiveCodeBench evaluation
     anno_path: Optional[str] = None  # Path to anno file (sol_*_anno.jsonl) for LiveCodeBench evaluation
@@ -1021,6 +1023,22 @@ def select_solutions(
     
     # Sort output by task_id for consistent ordering (matches problem set)
     output.sort(key=lambda x: (int(x["task_id"].split("/")[1]) if "/" in x["task_id"] else 0))
+
+    # Optionally randomly pick one solution per task to speed up final eval
+    if config.eval_single_random:
+        logger.warning(
+            "eval_single_random is enabled: randomly selecting ONE solution per task for final eval. "
+            "Results will be faster but less representative (single random sample per task)."
+        )
+        by_task: Dict[str, List[Dict]] = {}
+        for item in output:
+            tid = item["task_id"]
+            if tid not in by_task:
+                by_task[tid] = []
+            by_task[tid].append(item)
+        output = [random.choice(items) for items in by_task.values()]
+        output.sort(key=lambda x: (int(x["task_id"].split("/")[1]) if "/" in x["task_id"] else 0))
+        logger.info(f"Reduced to {len(output)} solutions (one per task) for eval")
     
     # Save selected solutions
     output_dir = os.path.join(config.output_dir, config.benchmark, "selection")
@@ -1233,6 +1251,8 @@ def run_evalplus(
     
     # Run evalplus (use python -m for reliable invocation across environments)
     benchmark_name = config.benchmark.replace("+", "")
+    if benchmark_name == "mbpp":  # don't know why but only disable parallelism could work on mbpp
+        config.evalplus_parallel = 1
     cmd = [
         sys.executable, "-m", "evalplus.evaluate",
         benchmark_name,
@@ -1394,6 +1414,8 @@ def main():
                        help="Per-solution timeout in seconds; solutions exceeding this are marked as not passing (default: 120)")
     parser.add_argument("--skip_evalplus", action="store_true",
                        help="Skip EvalPlus evaluation")
+    parser.add_argument("--eval_single_random", action="store_true",
+                       help="Randomly pick one solution per task for final eval (speeds up EvalPlus; less representative)")
 
     # LiveCodeBench parameters
     parser.add_argument("--anno_path", type=str, default=None,

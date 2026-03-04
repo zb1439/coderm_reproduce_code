@@ -4,7 +4,7 @@
     "dtype": "auto",
     "max_model_len": 4096,
     "gpu_memory_utilization": 0.8,
-    "max_num_seqs": 512,
+    "max_num_seqs": 64,
     "tensor_parallel_size": 1,
     "sampling_params": {
         "n": 100,
