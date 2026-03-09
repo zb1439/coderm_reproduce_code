@@ -102,6 +102,8 @@ class EvalConfig:
 
     # LiveCodeBench evaluation
     anno_path: Optional[str] = None  # Path to anno file (sol_*_anno.jsonl) for LiveCodeBench evaluation
+    anno_scenario: str = "codegeneration"  # Evaluator scenario for anno generation
+    anno_release_version: Optional[str] = None  # LiveCodeBench release version for anno generation
 
 
 # ==================== Logging Setup ====================
@@ -1031,6 +1033,75 @@ def _log_final_eval_results(
 
 # ==================== LiveCodeBench Evaluation ====================
 
+def generate_anno_from_solution(
+    solution_path: str,
+    config: EvalConfig,
+    logger: logging.Logger,
+) -> str:
+    """Auto-generate anno.jsonl from solution func.jsonl via LiveCodeBench evaluator.
+
+    Returns the path to the generated anno file.
+    """
+    from evaluation.generate_livecodebench_anno import (
+        load_json_or_jsonl,
+        build_custom_output,
+        run_custom_evaluator,
+        load_graded_map,
+        convert_to_anno,
+        save_jsonl,
+        save_json,
+    )
+
+    # Determine output path: put anno in the output directory
+    anno_dir = os.path.join(config.output_dir, config.benchmark, "anno")
+    os.makedirs(anno_dir, exist_ok=True)
+    sol_basename = os.path.basename(solution_path)
+    anno_basename = sol_basename.replace("_func.jsonl", "_anno.jsonl")
+    if anno_basename == sol_basename:
+        # Fallback if filename doesn't contain _func
+        anno_basename = sol_basename.replace(".jsonl", "_anno.jsonl")
+    anno_path = os.path.join(anno_dir, anno_basename)
+
+    logger.info(f"Loading solutions from {solution_path}")
+    func_rows = load_json_or_jsonl(Path(solution_path))
+    if not func_rows:
+        raise ValueError(f"No data found in {solution_path}")
+    logger.info(f"Loaded {len(func_rows)} tasks")
+
+    # Build custom output for evaluator
+    custom_output_path = os.path.join(anno_dir, "custom_output.json")
+    custom_rows = build_custom_output(func_rows)
+    save_json(Path(custom_output_path), custom_rows, overwrite=True)
+    logger.info(f"Built custom evaluator input: {custom_output_path}")
+
+    # Run LiveCodeBench evaluator
+    logger.info("Running LiveCodeBench custom evaluator...")
+    graded_path, evaluator_logs = run_custom_evaluator(
+        custom_output_file=Path(custom_output_path),
+        scenario=config.anno_scenario,
+        release_version=config.anno_release_version,
+        evaluator_module="lcb_runner.runner.custom_evaluator",
+        python_executable=sys.executable,
+        preferred_eval_file=None,
+    )
+    logger.info(f"Evaluator finished. Graded output: {graded_path}")
+    if evaluator_logs.strip():
+        # Log last 500 chars of evaluator output
+        logger.debug(f"Evaluator logs (tail): {evaluator_logs[-500:]}")
+
+    # Convert graded results to anno format
+    graded_map = load_graded_map(graded_path)
+    anno_rows, warnings = convert_to_anno(func_rows, graded_map, strict=False)
+    save_jsonl(Path(anno_path), anno_rows, overwrite=True)
+
+    logger.info(f"Generated anno: {len(anno_rows)} tasks -> {anno_path}")
+    if warnings:
+        for w in warnings[:10]:
+            logger.warning(f"Anno generation: {w}")
+
+    return anno_path
+
+
 def run_livecodebench_eval(
     selected_path: str,
     config: EvalConfig,
@@ -1048,9 +1119,9 @@ def run_livecodebench_eval(
     logger.info("=" * 60)
 
     if not config.anno_path:
-        raise ValueError(
-            "LiveCodeBench evaluation requires --anno_path pointing to "
-            "the anno JSONL file (e.g. sol_llama3-8b_100_anno.jsonl)."
+        logger.info("No --anno_path provided. Auto-generating anno from solution_path...")
+        config.anno_path = generate_anno_from_solution(
+            config.solution_path, config, logger
         )
 
     start_time = time.time()
@@ -1310,7 +1381,12 @@ def main():
 
     # LiveCodeBench parameters
     parser.add_argument("--anno_path", type=str, default=None,
-                       help="Path to anno JSONL file for LiveCodeBench evaluation (e.g. sol_llama3-8b_100_anno.jsonl)")
+                       help="Path to anno JSONL file for LiveCodeBench evaluation. "
+                            "If omitted, anno is auto-generated from --solution_path via LiveCodeBench evaluator.")
+    parser.add_argument("--anno_scenario", type=str, default="codegeneration",
+                       help="LiveCodeBench evaluator scenario (for auto anno generation)")
+    parser.add_argument("--anno_release_version", type=str, default=None,
+                       help="LiveCodeBench release version (for auto anno generation, e.g. release_v1)")
 
     # Resume support
     parser.add_argument("--resume_from", type=str, default=None,

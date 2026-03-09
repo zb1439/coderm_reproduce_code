@@ -32,13 +32,26 @@ python unified_eval.py \
     --num_solutions 100
 ```
 
-LiveCodeBench (requires `--anno_path` for ground truth annotation):
+LiveCodeBench (anno is auto-generated from `--solution_path` if `--anno_path` is omitted):
+
+```bash
+# Auto-generate anno (requires livecodebench package: pip install livecodebench)
+python unified_eval.py \
+    --model_path KAKA22/CodeRM-8B \
+    --prompt_path data/benchmark/input_livecodebench_ut.jsonl \
+    --solution_path data/result/livecodebench/sol_llama-8b-instruct_100_func.jsonl \
+    --benchmark livecodebench \
+    --num_unit_tests 100 \
+    --num_solutions 100
+```
+
+Or with a pre-computed anno file (skips anno generation, faster):
 
 ```bash
 python unified_eval.py \
     --model_path KAKA22/CodeRM-8B \
     --prompt_path data/benchmark/input_livecodebench_ut.jsonl \
-    --solution_path data/result/livecodebench/sol_llama-8b-instruct_100.jsonl \
+    --solution_path data/result/livecodebench/sol_llama-8b-instruct_100_func.jsonl \
     --benchmark livecodebench \
     --anno_path data/result/livecodebench/sol_llama-8b-instruct_100_anno.jsonl \
     --num_unit_tests 100 \
@@ -214,7 +227,9 @@ python unified_eval.py \
 - `--prompt_path`: Path to prompt JSONL file (e.g., `data/benchmark/input_humaneval+_ut.jsonl`)
 - `--solution_path`: Path to solution JSONL file
 - `--benchmark`: Benchmark name (`humaneval`, `mbpp`, or `livecodebench`)
-- `--anno_path`: Path to anno JSONL file (required for `livecodebench` only)
+- `--anno_path`: Path to anno JSONL file for `livecodebench`. If omitted, auto-generated from `--solution_path` via LiveCodeBench evaluator
+- `--anno_scenario`: Evaluator scenario for auto anno generation (default: `codegeneration`)
+- `--anno_release_version`: LiveCodeBench release version for auto anno generation (e.g. `release_v1`)
 
 ### Inference Parameters
 
@@ -567,15 +582,14 @@ python unified_eval.py \
     --mp_num 16
 ```
 
-LiveCodeBench:
+LiveCodeBench (anno auto-generated if `--anno_path` omitted; requires `pip install livecodebench`):
 
 ```bash
 python unified_eval.py \
     --model_path /path/to/model \
     --prompt_path data/benchmark/input_livecodebench_ut.jsonl \
-    --solution_path data/result/livecodebench/sol_model_100.jsonl \
+    --solution_path data/result/livecodebench/sol_model_100_func.jsonl \
     --benchmark livecodebench \
-    --anno_path data/result/livecodebench/sol_model_100_anno.jsonl \
     --num_unit_tests 100 \
     --num_solutions 100 \
     --mp_num 16
@@ -668,4 +682,4 @@ python unified_eval.py \
 - All intermediate files are saved for debugging and resumption
 - The script is designed to be idempotent (can be re-run safely)
 - Probability recording enables scaling law evaluation without re-generation
-- LiveCodeBench uses anno-based evaluation instead of EvalPlus; pass `--anno_path` with the ground truth file
+- LiveCodeBench uses anno-based evaluation instead of EvalPlus. If `--anno_path` is omitted, anno is auto-generated from `--solution_path` using the LiveCodeBench evaluator (requires `pip install livecodebench`). Pass `--anno_path` to skip generation and use a pre-computed file
