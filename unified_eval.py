@@ -60,9 +60,9 @@ MBPP_255_NOTE = "HARDCODED: Mbpp/255 - no LLM can generate time-bounded solution
 @dataclass
 class EvalConfig:
     """Configuration for evaluation"""
-    model_path: str
-    prompt_path: str
-    solution_path: str
+    model_path: Optional[str] = None
+    prompt_path: Optional[str] = None
+    solution_path: str = ""
     benchmark: str = "humaneval"
     num_unit_tests: int = 100
     num_solutions: int = 100
@@ -94,6 +94,9 @@ class EvalConfig:
     execution_timeout_seconds: float = 30.0  # Per-unit-test timeout; tests exceeding this are marked fail
     save_details: bool = False
     combine_dump_interval: int = 50 * 100 * 100  # Dump sol+ut pairs to disk every N items to save memory
+    
+    # Pre-existing unit tests (skip inference + extraction when provided)
+    unit_test_path: Optional[str] = None
     
     # Output file names
     raw_inference_filename: str = "raw_inference_results.jsonl"
@@ -1224,11 +1227,11 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    # Required arguments
-    parser.add_argument("--model_path", type=str, required=True,
-                       help="Path to the model for unit test generation")
-    parser.add_argument("--prompt_path", type=str, required=True,
-                       help="Path to the prompt JSONL file (e.g., data/benchmark/input_humaneval+_ut.jsonl)")
+    # Required arguments (model_path and prompt_path not needed when --unit_test_path is provided)
+    parser.add_argument("--model_path", type=str, default=None,
+                       help="Path to the model for unit test generation (not needed with --unit_test_path)")
+    parser.add_argument("--prompt_path", type=str, default=None,
+                       help="Path to the prompt JSONL file (not needed with --unit_test_path)")
     parser.add_argument("--solution_path", type=str, required=True,
                        help="Path to the solution JSONL file")
     
@@ -1292,6 +1295,10 @@ def main():
     parser.add_argument("--save_details", action="store_true",
                        help="Save detailed execution results")
     
+    # Pre-existing unit tests (bypass inference + extraction)
+    parser.add_argument("--unit_test_path", type=str, default=None,
+                       help="Path to pre-existing unit test JSONL file (skips inference and extraction steps)")
+    
     # Output file names
     parser.add_argument("--raw_inference_filename", type=str, default="raw_inference_results.jsonl",
                        help="Filename for raw inference results (default: raw_inference_results.jsonl)")
@@ -1322,6 +1329,13 @@ def main():
                        help="Path to existing run directory (e.g. output/2026-02-15_15-23-28). Defaults to --output_dir when --resume_from is set.")
     
     args = parser.parse_args()
+    
+    # Validate: model_path and prompt_path are required unless bypassing inference
+    if not args.unit_test_path and not args.resume_from:
+        if not args.model_path:
+            parser.error("--model_path is required (unless --unit_test_path or --resume_from is provided)")
+        if not args.prompt_path:
+            parser.error("--prompt_path is required (unless --unit_test_path or --resume_from is provided)")
     
     # Resume mode: load config from existing run
     if args.resume_from:
@@ -1435,9 +1449,18 @@ def main():
             selected_path = select_solutions(result_path, config.solution_path, config, logger)
             run_evalplus(selected_path, config, logger)
         else:
-            # Full pipeline
-            inference_results, raw_output_path = run_inference(config, logger)
-            unit_test_path = extract_unit_tests(inference_results, config, logger)
+            # Full pipeline (skip inference + extraction when unit_test_path is provided)
+            if config.unit_test_path:
+                logger.info("=" * 60)
+                logger.info("SKIPPING Steps 1-2: Using pre-existing unit tests")
+                logger.info("=" * 60)
+                logger.info(f"Loading unit tests from {config.unit_test_path}")
+                if not os.path.exists(config.unit_test_path):
+                    raise FileNotFoundError(f"Unit test file not found: {config.unit_test_path}")
+                unit_test_path = config.unit_test_path
+            else:
+                inference_results, raw_output_path = run_inference(config, logger)
+                unit_test_path = extract_unit_tests(inference_results, config, logger)
             result_path = execute_unit_tests(config.solution_path, unit_test_path, config, logger)
             selected_path = select_solutions(result_path, config.solution_path, config, logger)
             run_evalplus(selected_path, config, logger)
