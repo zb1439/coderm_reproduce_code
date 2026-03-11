@@ -11,7 +11,6 @@ This script provides a one-command solution for running the complete evaluation 
 
 It supports:
 - Generating unit tests with probability recording
-- Top-p/top-k sampling from previously generated tests
 - Comprehensive logging
 - Parallel execution optimization
 """
@@ -96,15 +95,8 @@ class EvalConfig:
     save_details: bool = False
     combine_dump_interval: int = 50 * 100 * 100  # Dump sol+ut pairs to disk every N items to save memory
     
-    # Top-p/top-k sampling from previous results
-    use_previous_ut: bool = False
-    previous_ut_path: Optional[str] = None
-    sample_top_p: Optional[float] = None
-    sample_top_k: Optional[int] = None
-    
     # Output file names
     raw_inference_filename: str = "raw_inference_results.jsonl"
-    sampled_inference_filename: str = "sampled_inference_results.jsonl"
     
     # Unit test extraction parameters
     coderm: bool = True  # Whether to use CodeRM extraction mode
@@ -318,11 +310,6 @@ def run_inference(
     prompts_data = load_jsonl(config.prompt_path)
     logger.info(f"Loaded {len(prompts_data)} prompts")
     
-    # Check if we should use previous unit tests
-    if config.use_previous_ut and config.previous_ut_path:
-        logger.info(f"Using previous unit tests from {config.previous_ut_path}")
-        return load_previous_and_sample(config, logger)
-    
     # Setup vLLM
     logger.info(f"Initializing vLLM with model: {config.model_path}")
     free_gpus = get_free_gpus(threshold=8192)  # 4GB min free memory for inference
@@ -416,118 +403,6 @@ def run_inference(
     logger.info(f"Saved raw inference results to {raw_output_path}")
     
     return all_outputs, raw_output_path
-
-
-def load_previous_and_sample(
-    config: EvalConfig,
-    logger: logging.Logger
-) -> Tuple[List[Dict], str]:
-    """Load previous unit tests and apply top-p/top-k sampling"""
-    logger.info("Loading previous unit test results")
-    
-    # Check if file exists
-    if not os.path.exists(config.previous_ut_path):
-        error_msg = (
-            f"Previous unit test file does not exist: {config.previous_ut_path}\n"
-            f"Please ensure the file exists or generate unit tests first."
-        )
-        logger.error(error_msg)
-        raise FileNotFoundError(error_msg)
-    
-    previous_data = load_jsonl(config.previous_ut_path)
-    
-    if not previous_data:
-        error_msg = (
-            f"Previous unit test file is empty: {config.previous_ut_path}\n"
-            f"Please ensure the file contains valid unit test data."
-        )
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    # Group by task_id
-    task_to_tests = {}
-    for item in previous_data:
-        task_id = item['task_id']
-        if task_id not in task_to_tests:
-            task_to_tests[task_id] = []
-        task_to_tests[task_id].append(item)
-    
-    # Check if we have enough unit tests per task
-    insufficient_tasks = []
-    for task_id, tests in task_to_tests.items():
-        available_count = len(tests)
-        required_count = config.num_unit_tests
-        
-        # If using top-k sampling, check against top-k limit
-        if config.sample_top_k:
-            available_count = min(available_count, config.sample_top_k)
-        
-        if available_count < required_count:
-            insufficient_tasks.append({
-                'task_id': task_id,
-                'available': available_count,
-                'required': required_count
-            })
-    
-    if insufficient_tasks:
-        error_msg = (
-            f"Insufficient unit tests available for {len(insufficient_tasks)} task(s).\n"
-            f"Required: {config.num_unit_tests} unit tests per task.\n"
-            f"Tasks with insufficient unit tests:\n"
-        )
-        for task_info in insufficient_tasks:
-            error_msg += (
-                f"  - {task_info['task_id']}: "
-                f"available={task_info['available']}, "
-                f"required={task_info['required']}\n"
-            )
-        if config.sample_top_k:
-            error_msg += (
-                f"\nNote: Top-k sampling is set to {config.sample_top_k}, "
-                f"which may limit available tests."
-            )
-        elif config.sample_top_p:
-            error_msg += (
-                f"\nNote: Top-p sampling is set to {config.sample_top_p}, "
-                f"which may limit available tests."
-            )
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    # Apply sampling
-    sampled_outputs = []
-    for task_id, tests in task_to_tests.items():
-        # Sort by probability (descending)
-        tests_sorted = sorted(tests, key=lambda x: x.get('probability', 0.0), reverse=True)
-        
-        if config.sample_top_k:
-            # Top-k sampling
-            sampled = tests_sorted[:config.sample_top_k]
-        elif config.sample_top_p:
-            # Top-p sampling
-            cumulative_prob = 0.0
-            sampled = []
-            for test in tests_sorted:
-                prob = test.get('probability', 0.0)
-                if cumulative_prob + prob <= config.sample_top_p:
-                    sampled.append(test)
-                    cumulative_prob += prob
-                else:
-                    break
-        else:
-            # No sampling, use all
-            sampled = tests_sorted
-        
-        sampled_outputs.extend(sampled[:config.num_unit_tests])
-    
-    logger.info(f"Sampled {len(sampled_outputs)} unit tests from previous results")
-    
-    output_dir = os.path.join(config.output_dir, config.benchmark, "inference")
-    os.makedirs(output_dir, exist_ok=True)
-    raw_output_path = os.path.join(output_dir, config.sampled_inference_filename)
-    save_jsonl(raw_output_path, sampled_outputs, overwrite=True)
-    
-    return sampled_outputs, raw_output_path
 
 
 # ==================== Unit Test Extraction ====================
@@ -1417,21 +1292,9 @@ def main():
     parser.add_argument("--save_details", action="store_true",
                        help="Save detailed execution results")
     
-    # Top-p/top-k sampling from previous results
-    parser.add_argument("--use_previous_ut", action="store_true",
-                       help="Use previously generated unit tests")
-    parser.add_argument("--previous_ut_path", type=str, default=None,
-                       help="Path to previous unit test results (with probabilities)")
-    parser.add_argument("--sample_top_p", type=float, default=None,
-                       help="Top-p value for sampling from previous results")
-    parser.add_argument("--sample_top_k", type=int, default=None,
-                       help="Top-k value for sampling from previous results")
-    
     # Output file names
     parser.add_argument("--raw_inference_filename", type=str, default="raw_inference_results.jsonl",
                        help="Filename for raw inference results (default: raw_inference_results.jsonl)")
-    parser.add_argument("--sampled_inference_filename", type=str, default="sampled_inference_results.jsonl",
-                       help="Filename for sampled inference results (default: sampled_inference_results.jsonl)")
     
     # Unit test extraction parameters
     parser.add_argument("--no-coderm", dest="coderm", action="store_false", default=True,
@@ -1555,7 +1418,7 @@ def main():
             # Resume: run extraction, execution, selection, EvalPlus
             raw_path = os.path.join(
                 config.output_dir, config.benchmark, "inference",
-                config.raw_inference_filename if not config.use_previous_ut else config.sampled_inference_filename
+                config.raw_inference_filename
             )
             if not os.path.exists(raw_path):
                 raise FileNotFoundError(f"Inference results not found: {raw_path}")
