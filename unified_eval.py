@@ -47,16 +47,6 @@ from transformers import AutoTokenizer
 
 # ==================== Configuration ====================
 
-# Hardcoded escape for Mbpp/255: no LLM can generate time-bounded solution
-# (itertools.product explodes exponentially; C-level code blocks SIGALRM).
-# We skip unit test execution for this task and use a pseudo wrong solution.
-MBPP_255_TASK_ID = "Mbpp/255"
-MBPP_255_PSEUDO_WRONG_SOLUTION = '''def combinations_colors(lst, n):
-    return []  # HARDCODED: Mbpp/255 - no LLM generates time-bounded solution; pseudo wrong to avoid timeout
-'''
-MBPP_255_NOTE = "HARDCODED: Mbpp/255 - no LLM can generate time-bounded solution; using pseudo wrong solution to avoid execution timeout."
-
-
 @dataclass
 class EvalConfig:
     """Configuration for evaluation"""
@@ -727,11 +717,6 @@ def execute_unit_tests(
                 logger.warning(f"Task {task_id} not found in unit tests")
                 continue
 
-            # Skip Mbpp/255: no LLM generates time-bounded solution; avoid execution timeout
-            if config.benchmark == "mbpp" and task_id == MBPP_255_TASK_ID:
-                logger.info(f"Skipping unit test execution for {MBPP_255_TASK_ID} (hardcoded escape)")
-                continue
-
             solutions = sol_dict[task_id]['solutions'][:config.num_solutions]
             unit_tests = ut_dict[task_id]['unit_tests'][:config.num_unit_tests]
 
@@ -901,7 +886,6 @@ def select_solutions(
     # Fallback: for tasks with no execution results (e.g. empty unit_tests due to
     # extraction failures), use the first solution so the output covers the full
     # problem set. EvalPlus asserts len(completion_id) == len(problems).
-    # Exception: Mbpp/255 uses hardcoded pseudo wrong solution (no LLM generates time-bounded solution).
     missing_tasks = set(task_id_to_sol_entry.keys()) - tasks_with_chosen
     if missing_tasks:
         logger.warning(
@@ -909,19 +893,11 @@ def select_solutions(
             f"execution results: {sorted(missing_tasks)[:5]}{'...' if len(missing_tasks) > 5 else ''}"
         )
         for task_id in sorted(missing_tasks):
-            if config.benchmark == "mbpp" and task_id == MBPP_255_TASK_ID:
-                output.append({
-                    "task_id": task_id,
-                    "solution": MBPP_255_PSEUDO_WRONG_SOLUTION,
-                    "note": MBPP_255_NOTE,
-                })
-                logger.info(f"Using hardcoded pseudo wrong solution for {MBPP_255_TASK_ID}")
-            else:
-                entry = task_id_to_sol_entry[task_id]
-                solutions = entry["solutions"]
-                if solutions:
-                    sol = _get_solution_code(solutions[0])
-                    output.append({"task_id": task_id, "solution": sol})
+            entry = task_id_to_sol_entry[task_id]
+            solutions = entry["solutions"]
+            if solutions:
+                sol = _get_solution_code(solutions[0])
+                output.append({"task_id": task_id, "solution": sol})
     
     # Sort output by task_id for consistent ordering (matches problem set)
     output.sort(key=lambda x: (int(x["task_id"].split("/")[1]) if "/" in x["task_id"] else 0))
@@ -1158,8 +1134,6 @@ def run_evalplus(
     
     # Run evalplus (use python -m for reliable invocation across environments)
     benchmark_name = config.benchmark.replace("+", "")
-    if benchmark_name == "mbpp":  # don't know why but only disable parallelism could work on mbpp
-        config.evalplus_parallel = 1
     cmd = [
         sys.executable, "-m", "evalplus.evaluate",
         benchmark_name,
@@ -1170,9 +1144,6 @@ def run_evalplus(
     logger.info(f"Running command: {' '.join(cmd)}")
     
     env = os.environ.copy()
-    # Use 2GB per worker to avoid OOM from memory-hungry solutions (e.g. Mbpp/300
-    # itertools.product). -1 disables the limit and allows workers to exhaust RAM.
-    env["EVALPLUS_MAX_MEMORY_BYTES"] = str(int(2e9))
     
     try:
         result = subprocess.run(
@@ -1391,6 +1362,13 @@ def main():
             logger.info(f"{key}: {value}")
         logger.info("=" * 60)
     
+    # EvalPlus device-specific tuning (values below are for RTX 3060 12GB):
+    #   --evalplus_parallel 1   (mbpp may hang with parallel > 1 on low-VRAM GPUs)
+    #   EVALPLUS_MAX_MEMORY_BYTES=2000000000  (2GB per worker; prevents OOM from
+    #       memory-hungry solutions like Mbpp/300 itertools.product)
+    # On higher-end GPUs (e.g. A100/H100), increase --evalplus_parallel and
+    # remove or raise the memory limit for faster evaluation.
+
     try:
         total_start_time = time.time()
         selected_path = None
