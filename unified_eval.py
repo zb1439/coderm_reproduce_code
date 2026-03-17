@@ -99,6 +99,7 @@ class EvalConfig:
     evalplus_timeout: float = 120  # Per-solution timeout (seconds); timeouts count as not passing
     skip_evalplus: bool = False
     eval_max_solutions_per_task: Optional[int] = None  # If set, randomly sample up to N solutions per task (balances variance vs eval speed)
+    test_detail: bool = False  # When True, run EvalPlus with --test_details and generate a report of wrong solutions
 
     # LiveCodeBench evaluation
     anno_path: Optional[str] = None  # Path to anno file (sol_*_anno.jsonl) for LiveCodeBench evaluation
@@ -1012,6 +1013,166 @@ def _log_final_eval_results(
     logger.info("")
 
 
+def _load_full_eval_results(selected_path: str) -> Optional[Dict[str, Any]]:
+    """Load full EvalPlus eval_results.json (including eval details)."""
+    base = selected_path.replace(".jsonl", "")
+    for suffix in ("_eval_results.json", ".eval_results.json"):
+        path = base + suffix
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+    return None
+
+
+def _get_benchmark_problems(benchmark: str) -> Dict[str, Dict[str, Any]]:
+    """Load benchmark problems (prompt, entry_point, etc.) from EvalPlus."""
+    try:
+        if benchmark.lower().replace("+", "") == "humaneval":
+            from evalplus.data import get_human_eval_plus
+            return get_human_eval_plus()
+        elif benchmark.lower().replace("+", "") == "mbpp":
+            from evalplus.data import get_mbpp_plus
+            return get_mbpp_plus()
+    except ImportError:
+        pass
+    return {}
+
+
+def _generate_test_detail_report(
+    selected_path: str,
+    config: EvalConfig,
+    logger: logging.Logger,
+) -> None:
+    """Generate a formatted report of all wrong solutions with failure details.
+
+    Creates:
+    - A markdown report (wrong_solutions_report.md) with questions, solutions, and failing inputs
+    - A JSON report (wrong_solutions_report.json) for programmatic use
+    """
+    logger.info("Generating test detail report of wrong solutions...")
+
+    results = _load_full_eval_results(selected_path)
+    if not results or "eval" not in results:
+        logger.warning("No eval results found; cannot generate test detail report")
+        return
+
+    problems = _get_benchmark_problems(config.benchmark)
+    if not problems:
+        logger.warning("Could not load benchmark problems; report will omit question text")
+
+    wrong_entries: List[Dict[str, Any]] = []
+    eval_data = results.get("eval", {})
+
+    for task_id, task_results in eval_data.items():
+        problem = problems.get(task_id, {})
+        prompt_text = problem.get("prompt", "(question not available)")
+        entry_point = problem.get("entry_point", "?")
+
+        for completion_id, res in enumerate(task_results):
+            base_status = res.get("base_status", "")
+            plus_status = res.get("plus_status")
+            if base_status == "pass" and (plus_status is None or plus_status == "pass"):
+                continue
+
+            base_fail = res.get("base_fail_tests") or []
+            plus_fail = res.get("plus_fail_tests") or []
+            solution = res.get("solution", "")
+
+            failure_info: List[str] = []
+            if base_status == "timeout":
+                failure_info.append("Base tests: TIMEOUT")
+            elif base_status == "fail":
+                failure_info.append(f"Base tests: FAILED on {len(base_fail)} input(s)")
+                for i, inp in enumerate(base_fail[:10]):  # Limit to first 10 for readability
+                    failure_info.append(f"  - Failing input #{i+1}: {inp}")
+                if len(base_fail) > 10:
+                    failure_info.append(f"  ... and {len(base_fail) - 10} more")
+
+            if plus_status and plus_status != "pass":
+                if plus_status == "timeout":
+                    failure_info.append("Plus tests: TIMEOUT")
+                else:
+                    failure_info.append(f"Plus tests: FAILED on {len(plus_fail)} input(s)")
+                    for i, inp in enumerate(plus_fail[:10]):
+                        failure_info.append(f"  - Failing input #{i+1}: {inp}")
+                    if len(plus_fail) > 10:
+                        failure_info.append(f"  ... and {len(plus_fail) - 10} more")
+
+            wrong_entries.append({
+                "task_id": task_id,
+                "completion_id": completion_id,
+                "entry_point": entry_point,
+                "question": prompt_text,
+                "solution": solution,
+                "base_status": base_status,
+                "plus_status": plus_status,
+                "base_fail_tests": base_fail,
+                "plus_fail_tests": plus_fail,
+                "failure_summary": "\n".join(failure_info),
+            })
+
+    if not wrong_entries:
+        logger.info("No wrong solutions to report (all passed)")
+        return
+
+    out_dir = os.path.dirname(selected_path)
+    md_path = os.path.join(out_dir, "wrong_solutions_report.md")
+    json_path = os.path.join(out_dir, "wrong_solutions_report.json")
+
+    # Write JSON report
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(wrong_entries, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved JSON report: {json_path}")
+
+    # Write markdown report
+    lines = [
+        "# Wrong Solutions Report",
+        "",
+        f"**Benchmark:** {config.benchmark}",
+        f"**Total wrong solutions:** {len(wrong_entries)}",
+        "",
+        "---",
+        "",
+    ]
+
+    for idx, entry in enumerate(wrong_entries, 1):
+        lines.append(f"## {idx}. {entry['task_id']} (completion #{entry['completion_id']})")
+        lines.append("")
+        lines.append("### Question / Prompt")
+        lines.append("")
+        lines.append("```")
+        lines.append(entry["question"][:2000] + ("..." if len(entry["question"]) > 2000 else ""))
+        lines.append("```")
+        lines.append("")
+        lines.append("### Wrong Solution")
+        lines.append("")
+        lines.append("```python")
+        sol = entry["solution"]
+        lines.append(sol[:4000] + ("\n# ... (truncated)" if len(sol) > 4000 else ""))
+        lines.append("```")
+        lines.append("")
+        lines.append("### Failure Details")
+        lines.append("")
+        lines.append(f"- **Base status:** {entry['base_status']}")
+        lines.append(f"- **Plus status:** {entry['plus_status'] or 'N/A'}")
+        lines.append("")
+        lines.append("**Failing inputs / summary:**")
+        lines.append("")
+        for line in entry["failure_summary"].split("\n"):
+            lines.append(line)
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info(f"Saved markdown report: {md_path}")
+    logger.info(f"Report covers {len(wrong_entries)} wrong solution(s)")
+
+
 # ==================== LiveCodeBench Evaluation ====================
 
 def run_livecodebench_eval(
@@ -1140,6 +1301,17 @@ def run_evalplus(
         "--samples", selected_path,
         "--parallel", str(config.evalplus_parallel),
     ]
+    if config.test_detail:
+        cmd.extend(["--test_details", "True"])
+        logger.info("Test details enabled: EvalPlus will run all tests and record failing inputs")
+        # Remove cached results so EvalPlus re-runs with test_details (cached may lack full fail info)
+        base = selected_path.replace(".jsonl", "")
+        for suffix in ("_eval_results.json", ".eval_results.json"):
+            cache_path = base + suffix
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+                logger.info(f"Removed cached {cache_path} to force re-run with test details")
+                break
     
     logger.info(f"Running command: {' '.join(cmd)}")
     
@@ -1187,6 +1359,10 @@ def run_evalplus(
 
     # Log final results prominently
     _log_final_eval_results(parsed, selected_path, logger, config.benchmark)
+
+    # Generate test detail report when requested
+    if config.test_detail:
+        _generate_test_detail_report(selected_path, config, logger)
 
 
 # ==================== Main Pipeline ====================
@@ -1287,6 +1463,8 @@ def main():
                        help="Skip EvalPlus evaluation")
     parser.add_argument("--eval_max_solutions_per_task", type=int, default=None, metavar="N",
                        help="Randomly sample up to N solutions per task for final eval (balances variance vs speed; default: keep all)")
+    parser.add_argument("--test-detail", action="store_true", dest="test_detail",
+                       help="Run EvalPlus with test details; generate a formatted report of wrong solutions with failure info (failing inputs)")
 
     # LiveCodeBench parameters
     parser.add_argument("--anno_path", type=str, default=None,
@@ -1324,6 +1502,8 @@ def main():
                 del saved_config[k]
         config = EvalConfig(**saved_config)
         config.output_dir = resume_dir
+        if getattr(args, "test_detail", False):
+            config.test_detail = True
         if config.log_file is None:
             config.log_file = os.path.join(config.output_dir, config.benchmark, "eval.log")
         logger = setup_logging(config)
