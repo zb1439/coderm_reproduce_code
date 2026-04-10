@@ -15,9 +15,10 @@ There are **3 evaluation tasks** remaining. All solution generation is complete.
 ## Quick Start
 
 ```bash
-# Clone this repo
-git clone <this-repo-url>
+# Clone this repo and checkout the correct branch
+git clone https://github.com/zb1439/coderm_reproduce_code.git
 cd coderm_reproduce_code
+git checkout codex/solution-api
 
 # Install dependencies
 pip install evalplus datasets tqdm
