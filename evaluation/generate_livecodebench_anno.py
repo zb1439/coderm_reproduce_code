@@ -84,15 +84,36 @@ def normalize_code_for_anno(raw_solution: str) -> str:
     return code
 
 
-def build_custom_output(func_rows):
+def build_custom_output(func_rows, benchmark_problems=None):
+    """Build custom_output for LCB evaluator.
+
+    If benchmark_problems is provided, we pad the output so that every problem
+    in the benchmark is present (with an empty code_list for missing ones).
+    This is needed because the evaluator asserts len(custom) == len(benchmark).
+    """
+    func_map = {str(row["task_id"]): row for row in func_rows}
     custom_rows = []
-    for row in func_rows:
-        custom_rows.append(
-            {
+
+    if benchmark_problems is not None:
+        for problem in benchmark_problems:
+            qid = str(problem.question_id)
+            if qid in func_map:
+                row = func_map[qid]
+                custom_rows.append({
+                    "question_id": qid,
+                    "code_list": [strip_code_fence(x) for x in row["solutions"]],
+                })
+            else:
+                custom_rows.append({
+                    "question_id": qid,
+                    "code_list": [],
+                })
+    else:
+        for row in func_rows:
+            custom_rows.append({
                 "question_id": str(row["task_id"]),
                 "code_list": [strip_code_fence(x) for x in row["solutions"]],
-            }
-        )
+            })
     return custom_rows
 
 
@@ -142,8 +163,16 @@ def run_custom_evaluator(
     if release_version:
         cmd.extend(["--release_version", release_version])
 
+    # lcb_runner uses relative paths to load few-shot examples, so we must
+    # run the evaluator from the LiveCodeBench repo root.
+    lcb_repo_root = os.environ.get("LCB_REPO_ROOT", "/tmp/lcb_repo")
+
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = lcb_repo_root + (":" + existing if existing else "")
+
     started_at = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=lcb_repo_root, env=env)
     logs = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if proc.returncode != 0:
         raise RuntimeError(
@@ -344,7 +373,16 @@ def main():
     evaluator_logs = ""
 
     if args.run_evaluator:
-        custom_rows = build_custom_output(func_rows)
+        # Load benchmark problems so we can pad custom_output to match evaluator expectations
+        benchmark_problems = None
+        try:
+            from lcb_runner.benchmarks.code_generation import load_code_generation_dataset
+            benchmark_problems = load_code_generation_dataset(
+                release_version=args.release_version
+            )
+        except Exception as e:
+            print(f"Warning: could not load benchmark dataset: {e}")
+        custom_rows = build_custom_output(func_rows, benchmark_problems)
         if args.custom_output_path:
             custom_output_path = Path(args.custom_output_path)
             save_json(custom_output_path, custom_rows, overwrite=args.overwrite)

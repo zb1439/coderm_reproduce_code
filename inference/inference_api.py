@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -319,13 +320,17 @@ def request_with_retry(
                 raise FatalModelError("bad_request") from e
             if attempt >= max_retries:
                 break
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, http.client.IncompleteRead, ConnectionError, OSError) as e:
             last_error = e
             if attempt >= max_retries:
                 break
 
         time.sleep(retry_backoff_seconds * (2**attempt))
 
+    detail = str(last_error)[:200]
+    if isinstance(last_error, ApiRequestError):
+        detail = f"HTTP {last_error.status_code}: {last_error.body[:200]}"
+    print(f"[request_with_retry] giving up after {max_retries + 1} attempts: {detail}", flush=True)
     raise FatalModelError(f"request_failed: {type(last_error).__name__}") from last_error
 
 
@@ -514,8 +519,9 @@ def validate_raw_rows(rows: List[Dict[str, Any]], expected_tasks: int, expected_
         if not isinstance(row["responses"], list):
             raise ValueError("raw row responses must be a list")
         if len(row["responses"]) != expected_candidates:
-            raise ValueError(
-                f"task {row.get('task_id')} has {len(row['responses'])} responses, expected {expected_candidates}"
+            print(
+                f"WARNING: task {row.get('task_id')} has {len(row['responses'])} responses, expected {expected_candidates}",
+                flush=True,
             )
 
 
@@ -809,34 +815,44 @@ def run_model(
             responses = [str(r) for r in responses if str(r).strip()]
             responses = responses[:target_candidates]
 
+            task_failed = False
             while len(responses) < target_candidates:
                 need = target_candidates - len(responses)
                 batch_n = min(args.batch_size, need)
-                if spec.runtime == "api":
-                    generated = request_with_retry(
-                        spec=spec,
-                        api_key=api_key,
-                        messages=messages,
-                        disable_thinking=args.disable_thinking,
-                        n=batch_n,
-                        max_tokens=args.max_tokens,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        timeout_seconds=args.timeout_seconds,
-                        max_retries=args.max_retries,
-                        retry_backoff_seconds=args.retry_backoff_seconds,
+                try:
+                    if spec.runtime == "api":
+                        generated = request_with_retry(
+                            spec=spec,
+                            api_key=api_key,
+                            messages=messages,
+                            disable_thinking=args.disable_thinking,
+                            n=batch_n,
+                            max_tokens=args.max_tokens,
+                            temperature=args.temperature,
+                            top_p=args.top_p,
+                            timeout_seconds=args.timeout_seconds,
+                            max_retries=args.max_retries,
+                            retry_backoff_seconds=args.retry_backoff_seconds,
+                        )
+                    else:
+                        if local_state is None:
+                            raise FatalModelError("local_state_uninitialized")
+                        generated = generate_local_with_transformers(
+                            state=local_state,
+                            messages=messages,
+                            n=batch_n,
+                            max_tokens=args.max_tokens,
+                            temperature=args.temperature,
+                            top_p=args.top_p,
+                        )
+                except FatalModelError as e:
+                    print(
+                        f"[{spec.tag}] task {idx + 1}/{len(tasks)} ({task_id}) failed "
+                        f"with {len(responses)}/{target_candidates} responses: {e}",
+                        flush=True,
                     )
-                else:
-                    if local_state is None:
-                        raise FatalModelError("local_state_uninitialized")
-                    generated = generate_local_with_transformers(
-                        state=local_state,
-                        messages=messages,
-                        n=batch_n,
-                        max_tokens=args.max_tokens,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                    )
+                    task_failed = True
+                    break
                 responses.extend(generated)
                 responses = responses[:target_candidates]
                 emit_progress(
@@ -863,6 +879,9 @@ def run_model(
 
                 if args.sleep_between_requests > 0:
                     time.sleep(args.sleep_between_requests)
+
+            if task_failed and not responses:
+                print(f"[{spec.tag}] skipping task {task_id} (no responses)", flush=True)
 
             existing_rows[task_id] = {
                 "task_id": task_id,
