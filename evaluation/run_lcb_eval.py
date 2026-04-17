@@ -32,19 +32,29 @@ def main():
     func_map = {str(r["task_id"]): r["solutions"] for r in func_rows}
     print(f"Loaded {len(func_rows)} tasks from {args.func_path}", flush=True)
 
-    # Convert problem objects to evaluation dicts and pad to match benchmark size
+    # Only evaluate problems where we have solutions. Keep equal-length lists
+    # (codegen_metrics requires all generation lists to match generations_list[0] length).
     samples = []
     custom_outputs = []
-    our_indices = []  # track which indices are ours
-    for i, p in enumerate(benchmark):
+    task_ids = []
+    target_n = None
+    for p in benchmark:
         qid = str(p.question_id)
+        sols = func_map.get(qid)
+        if not sols:
+            continue
+        if target_n is None:
+            target_n = len(sols)
+        # Pad/truncate so every list has the same length
+        if len(sols) < target_n:
+            sols = sols + [""] * (target_n - len(sols))
+        elif len(sols) > target_n:
+            sols = sols[:target_n]
         samples.append(p.get_evaluation_sample())
-        sols = func_map.get(qid, [])
         custom_outputs.append(sols)
-        if sols:
-            our_indices.append(i)
+        task_ids.append(qid)
 
-    print(f"Evaluating {len(our_indices)}/{len(benchmark)} problems with solutions", flush=True)
+    print(f"Evaluating {len(samples)} problems with {target_n} solutions each", flush=True)
 
     metrics, results, metadata = codegen_metrics(
         samples,
@@ -55,11 +65,10 @@ def main():
 
     print(f"\nOverall metrics: {json.dumps(metrics, indent=2)}", flush=True)
 
-    # Extract graded_list for our tasks only
+    # Extract graded_list per task (results keyed by index into our filtered list)
     graded_map = {}
-    for i, p in enumerate(benchmark):
-        qid = str(p.question_id)
-        if qid in func_map and i in results:
+    for i, qid in enumerate(task_ids):
+        if i in results:
             graded_map[qid] = results[i]
 
     Path(args.output_path).parent.mkdir(parents=True, exist_ok=True)

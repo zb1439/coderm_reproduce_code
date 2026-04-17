@@ -628,6 +628,14 @@ def build_model_specs() -> List[ModelSpec]:
             api_key_env="OPENROUTER_API_KEY",
             enabled=has_openrouter,
         ),
+        ModelSpec(
+            tag="qwen3-8b",
+            model="qwen/qwen3-8b",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            enabled=has_openrouter,
+        ),
     ]
 
 
