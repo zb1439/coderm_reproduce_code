@@ -66,10 +66,13 @@ def main():
     print(f"\nOverall metrics: {json.dumps(metrics, indent=2)}", flush=True)
 
     # Extract graded_list per task (results keyed by index into our filtered list)
+    # Trim padding entries back to the actual solution count to avoid "phantom" labels.
     graded_map = {}
     for i, qid in enumerate(task_ids):
-        if i in results:
-            graded_map[qid] = results[i]
+        if i not in results:
+            continue
+        real_n = len(func_map.get(qid, []))
+        graded_map[qid] = results[i][:real_n]
 
     Path(args.output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output_path, "w") as f:

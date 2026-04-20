@@ -861,6 +861,15 @@ def run_model(
                     )
                     task_failed = True
                     break
+                if args.require_extractable:
+                    # Filter out responses that extract_solution.py won't accept
+                    _pattern_py = re.compile(r'```python\n(.*?)\n```', re.DOTALL)
+                    _pattern_any = re.compile(r'```\n(.*?)\n```', re.DOTALL)
+                    kept = []
+                    for r in generated:
+                        if _pattern_py.search(r) or _pattern_any.search(r):
+                            kept.append(r)
+                    generated = kept
                 responses.extend(generated)
                 responses = responses[:target_candidates]
                 emit_progress(
@@ -1023,6 +1032,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_retries", type=int, default=5)
     parser.add_argument("--retry_backoff_seconds", type=float, default=1.0)
     parser.add_argument("--sleep_between_requests", type=float, default=0.0)
+    parser.add_argument(
+        "--require_extractable",
+        action="store_true",
+        help="Discard responses where extract_solution.py cannot find a Python code block; keep regenerating until candidates are extractable.",
+    )
     parser.add_argument(
         "--progress_every",
         type=int,
