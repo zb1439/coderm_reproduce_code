@@ -182,6 +182,40 @@ def is_qwen_model(spec: ModelSpec) -> bool:
     return "qwen" in model
 
 
+def with_strict_code_only(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Append a strong 'no comments / just code' instruction to the last user message."""
+    if not messages:
+        return messages
+    copied: List[Dict[str, Any]] = [dict(m) for m in messages]
+    suffix = (
+        "\n\nCRITICAL: Zero comments allowed. Zero explanations. "
+        "Output ONLY the raw Python code inside ```python...```. "
+        "Keep it under 40 lines. If unsure, write a simple brute-force attempt."
+    )
+    # Find last user message
+    for i in range(len(copied) - 1, -1, -1):
+        msg = copied[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            copied[i] = dict(msg)
+            copied[i]["content"] = content + suffix
+            return copied
+        if isinstance(content, list):
+            new_list = list(content)
+            for j in range(len(new_list) - 1, -1, -1):
+                it = new_list[j]
+                if isinstance(it, dict) and it.get("type") == "text":
+                    it = dict(it)
+                    it["text"] = (it.get("text", "") or "") + suffix
+                    new_list[j] = it
+                    copied[i] = dict(msg)
+                    copied[i]["content"] = new_list
+                    return copied
+    return copied
+
+
 def with_no_think_instruction(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not messages:
         return messages
@@ -265,6 +299,7 @@ def request_with_retry(
     timeout_seconds: int,
     max_retries: int,
     retry_backoff_seconds: float,
+    strict_code_only: bool = False,
 ) -> List[str]:
     endpoint = spec.base_url.rstrip("/") + "/chat/completions"
     headers = build_headers(api_key)
@@ -272,6 +307,8 @@ def request_with_retry(
     request_messages = messages
     if disable_thinking and is_qwen_model(spec):
         request_messages = with_no_think_instruction(messages)
+    if strict_code_only:
+        request_messages = with_strict_code_only(request_messages)
 
     # OpenRouter does not support n>1; force n=1 and let the outer loop retry.
     effective_n = 1 if spec.provider == "openrouter" else n
@@ -841,6 +878,7 @@ def run_model(
                             timeout_seconds=args.timeout_seconds,
                             max_retries=args.max_retries,
                             retry_backoff_seconds=args.retry_backoff_seconds,
+                            strict_code_only=args.strict_code_only,
                         )
                     else:
                         if local_state is None:
@@ -1036,6 +1074,11 @@ def parse_args() -> argparse.Namespace:
         "--require_extractable",
         action="store_true",
         help="Discard responses where extract_solution.py cannot find a Python code block; keep regenerating until candidates are extractable.",
+    )
+    parser.add_argument(
+        "--strict_code_only",
+        action="store_true",
+        help="Append a 'zero comments, code only, <40 lines' directive to the user prompt. Helps models that fill max_tokens with commented reasoning.",
     )
     parser.add_argument(
         "--progress_every",
