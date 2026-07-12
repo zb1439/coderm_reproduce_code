@@ -1,16 +1,17 @@
 # CodeRM Reproduce - Progress Report
 
-_Last updated: 2026-07-11_
+_Last updated: 2026-07-12_
 
 ## 概要
 
-用 4 个模型在 4 个 benchmark 上生成 100 candidate × task，然后打标得到 pass/fail ground truth。
+用 5 个模型在 4 个 benchmark 上生成 100 candidate × task，然后打标得到 pass/fail ground truth。
 
 **Models:**
 - `gemma-3-4b` → `google/gemma-3-4b-it` (OpenRouter)
 - `ministral-3b` → `mistralai/ministral-3b-2512` (OpenRouter)
 - `qwen3-8b` → `qwen/qwen3-8b` (OpenRouter, `/no_think`)
 - `grok-4.3-nonreasoning` → `x-ai/grok-4.3` (OpenRouter, reasoning disabled)
+- `glm-5.2-nonreasoning` → `z-ai/glm-5.2` (OpenRouter, reasoning disabled)
 
 **Benchmarks:**
 - HumanEval+ (164 tasks) - evalplus 格式
@@ -32,6 +33,7 @@ _Last updated: 2026-07-11_
 | LCB v4 (168) | ministral-3b | 16800/16800 | 16800/16800 ✅ | 28.3% | 60.1% |
 | LCB v4 (168) | qwen3-8b | 16800/16800 | 16800/16800 ✅ | 41.9% | 55.4% |
 | LCB v4 (168) | grok-4.3-nonreasoning | 16800/16800 | 16800/16800 ✅ | 58.9% | 86.9% |
+| LCB v4 (168) | glm-5.2-nonreasoning | 16800/16800 | 16800/16800 ✅ | 76.0% | 97.6% |
 | LCB v6 new (342) | gemma-3-4b | 34200/34200 | 34200/34200 ✅ | 15.3% | 21.9% |
 | LCB v6 new (342) | ministral-3b | 34200/34200 | 34100/34200 ⚠️ 341/342 | 20.5% | 44.3% |
 | LCB v6 new (342) | qwen3-8b | 34200/34200 | 34200/34200 ✅ | 22.7% | 33.0% |
@@ -50,13 +52,14 @@ _Last updated: 2026-07-11_
 | LCB v4 (168) | ministral-3b | `data/result/livecodebench/sol_ministral-3b_100_func_converted.jsonl` | `output/livecodebench/graded_ministral-3b.json` |
 | LCB v4 (168) | qwen3-8b | `data/result/livecodebench/sol_qwen3-8b_100_func_converted.jsonl` | `output/livecodebench/graded_qwen3-8b.json` |
 | LCB v4 (168) | grok-4.3-nonreasoning | `data/result/livecodebench/sol_grok-4.3-nonreasoning_100_func_converted.jsonl` | `output/livecodebench/graded_grok-4.3-nonreasoning.json` |
+| LCB v4 (168) | glm-5.2-nonreasoning | `data/result/livecodebench/sol_glm-5.2-nonreasoning_100_func_converted.jsonl` | `output/livecodebench/graded_glm-5.2-nonreasoning.json` |
 | LCB v6 new (342) | gemma-3-4b | `data/result/livecodebench_v6new/sol_gemma-3-4b_100_func_converted.jsonl` | `output/livecodebench_v6new/graded_gemma-3-4b.json` |
 | LCB v6 new (342) | ministral-3b | `data/result/livecodebench_v6new/sol_ministral-3b_100_func_converted.jsonl` | `output/livecodebench_v6new/graded_ministral-3b.json` |
 | LCB v6 new (342) | qwen3-8b | `data/result/livecodebench_v6new/sol_qwen3-8b_100_func_converted.jsonl` | `output/livecodebench_v6new/graded_qwen3-8b.json` |
 
 ## 数据完整性
 
-- ✅ 12/13 组合完全 100% 打标
+- ✅ 13/14 组合完全 100% 打标
 - ⚠️ LCB v6new Ministral-3B: 341/342 (1 个 task `abc377_e` 因为某个 solution 导致 ProcessPool 崩溃，无法 grade)
 - Raw solutions 全部 100% 完整
 - Func solutions 全部 = raw（`--require_extractable` 保证）
