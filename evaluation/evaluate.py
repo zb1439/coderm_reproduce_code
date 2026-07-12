@@ -238,7 +238,8 @@ def save_sol_and_ut_comb(benchmark, sol_model, ut_model, sol_num, ut_num, sol_pa
     ut_dataset = load_jsonl(ut_dataset)
 
     for i in tqdm(range(len(sol_dataset))):
-        for sol_id in range(sol_num):
+        actual_sol_num = min(sol_num, len(sol_dataset[i]["solutions"]))
+        for sol_id in range(actual_sol_num):
             for ut_id in range(len(ut_dataset[i]["unit_tests"])):
                 if ut_id == ut_num:
                     break
